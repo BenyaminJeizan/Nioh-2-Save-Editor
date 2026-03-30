@@ -1,94 +1,191 @@
 import subprocess
-from tkinter import Tk, filedialog, ttk, messagebox
-import os
+from tkinter import Tk, filedialog, ttk, messagebox, TclError
+import tkinter as tk
 from pathlib import Path
 import shutil
 import json
-import tkinter as tk
+import sys
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+from enum import Enum
 
 # ==================== CONSTANTS ====================
-# Currency & Stats
-AMRITA_OFFSET = 0x7B8D0
-GOLD_OFFSET = 0x7B8D8
-PLAYER_LEVEL = 0x1C4904
-CONSTITUTION = 0x1C490C
-HEART = 0x1C4910
-COURAGE = 0x1C4928
-STAMINA = 0x1C4914
-STRENGTH = 0x1C4918
-SKILL = 0x1C491C
-DEXTERITY = 0x1C4920
-MAGIC = 0x1C4924
+class Offsets(Enum):
+    """Game offset constants"""
+    AMRITA = 0x7B8D0
+    GOLD = 0x7B8D8
+    PLAYER_LEVEL = 0x1C4904
+    CONSTITUTION = 0x1C490C
+    HEART = 0x1C4910
+    COURAGE = 0x1C4928
+    STAMINA = 0x1C4914
+    STRENGTH = 0x1C4918
+    SKILL = 0x1C491C
+    DEXTERITY = 0x1C4920
+    MAGIC = 0x1C4924
+    NINJITSU = 0x1C4B58
+    ONMYO = 0x1C4B64
+    SWORD = 0x1C4A8C
+    DUAL_SWORD = 0x1C4A98
+    AXE = 0x1C4AB0
+    KUSARIGAMA = 0x1C4ABC
+    ODACHI = 0x1C4AC8
+    TONFA = 0x1C4AD4
+    HATCHET = 0x1C4AE0
+    WEAPON_START = 0xED508
+    ITEM_START = 0x105EC8
+    SCROLL_START = 0x294080
 
-# Proficiency
-NINJITSU = 0x1C4B58
-ONMYO = 0x1C4B64
-SWORD = 0x1C4A8C
-DUAL_SWORD = 0x1C4A98
-AXE = 0x1C4AB0
-KUSARIGAMA = 0x1C4ABC
-ODACHI = 0x1C4AC8
-TONFA = 0x1C4AD4
-HATCHET = 0x1C4AE0
+class InventorySize(Enum):
+    """Inventory size constants"""
+    WEAPON_SIZE = 0x90
+    WEAPON_SLOTS = 700
+    ITEM_SIZE = 0x88
+    ITEM_SLOTS = 900
+    SCROLL_SIZE = 0x88
+    SCROLL_SLOTS = 248
 
-# Inventory offsets
-WEAPON_START = 0xED508
-WEAPON_SIZE = 0x90
-WEAPON_SLOTS = 700
-
-ITEM_START = 0x105EC8
-ITEM_SIZE = 0x88
-ITEM_SLOTS = 900
-
-SCROLL_START = 0x294080
-SCROLL_SIZE = 0x88
-SCROLL_SLOTS = 248
+# ==================== DATA MODELS ====================
+@dataclass
+class GameMode:
+    """Represents PC or PS4 mode"""
+    name: str
+    exe_path: str
+    
+def get_stat_definitions() -> List[Tuple[str, int, int]]:
+    """Return stat name, offset, byte_size tuples"""
+    return [
+        ("Amrita", Offsets.AMRITA.value, 8),
+        ("Gold", Offsets.GOLD.value, 8),
+        ("Level", Offsets.PLAYER_LEVEL.value, 2),
+        ("Constitution", Offsets.CONSTITUTION.value, 2),
+        ("Heart", Offsets.HEART.value, 2),
+        ("Courage", Offsets.COURAGE.value, 2),
+        ("Stamina", Offsets.STAMINA.value, 2),
+        ("Strength", Offsets.STRENGTH.value, 2),
+        ("Skill", Offsets.SKILL.value, 2),
+        ("Dexterity", Offsets.DEXTERITY.value, 2),
+        ("Magic", Offsets.MAGIC.value, 2),
+        ("Ninjutsu", Offsets.NINJITSU.value, 4),
+        ("Onmyo", Offsets.ONMYO.value, 4),
+        ("Sword", Offsets.SWORD.value, 4),
+        ("Dual Sword", Offsets.DUAL_SWORD.value, 4),
+        ("Axe", Offsets.AXE.value, 4),
+        ("Kusarigama", Offsets.KUSARIGAMA.value, 4),
+        ("Odachi", Offsets.ODACHI.value, 4),
+        ("Tonfa", Offsets.TONFA.value, 4),
+        ("Hatchet", Offsets.HATCHET.value, 4),
+    ]
 
 # ==================== GLOBALS ====================
-data = None
-MODE = None
-IMPORT_MODE=None
-import_data=None
-decrypted_path = None
-decrypted_path_import=None
-weapons = []
-items = []
-scrolls = []
-selected_weapon = None
-selected_weapon_index = None
-selected_item = None
-selected_item_index = None
-selected_scroll = None
-selected_scroll_index = None
-decrypted=False
-decrypted_import=False
+data: bytearray = bytearray()
+import_data: bytearray = bytearray()
+MODE: Optional[str] = None
+IMPORT_MODE: Optional[str] = None
+decrypted_path: Path = Path()
+decrypted_path_import: Path = Path()
+decrypted: bool = False
+decrypted_import: bool = False
 
-base_dir = Path(__file__).parent
+weapons: List[Dict] = []
+items: List[Dict] = []
+scrolls: List[Dict] = []
+APP_INSTANCE = None
 
-# ==================== JSON LOADING ====================
-def load_json(file_name):
-    file_path = base_dir / file_name
-    with open(file_path, "r") as file:
-        return json.load(file)
+def get_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
-items_json = load_json("items.json")
-effects_json = load_json("effects.json")
-effect_dropdown_list = [
-    f"{entry['id']} - {entry['Effect']}"
-    for entry in effects_json
-]
 
-# ==================== HELPERS ====================
-def find_value_at_offset(section_data, offset, byte_size):
+base_dir = get_base_dir()
+config_file = base_dir / "editor_config.json"
+AUTO_LOAD_LAST_SAVE = True
+SHOW_LOAD_SUCCESS_POPUP = False
+LEFT_PANEL_MIN_WIDTH = 400
+
+
+def resource_path(*parts: str) -> Path:
+    return base_dir.joinpath(*parts)
+
+# ==================== CONFIG MANAGEMENT ====================
+class ConfigManager:
+    """Manage application configuration and preferences"""
+    
+    @staticmethod
+    def load_config() -> Dict:
+        """Load config from file or return defaults"""
+        if config_file.exists():
+            try:
+                with open(config_file, 'r') as f:
+                    return json.load(f)
+            except:
+                return ConfigManager.get_defaults()
+        return ConfigManager.get_defaults()
+    
+    @staticmethod
+    def get_defaults() -> Dict:
+        return {
+            "panel_widths": {"weapon": LEFT_PANEL_MIN_WIDTH, "item": LEFT_PANEL_MIN_WIDTH, "scroll": LEFT_PANEL_MIN_WIDTH},
+            "window_geometry": "1400x800",
+            "last_save_path": ""
+        }
+    
+    @staticmethod
+    def save_config(config: Dict):
+        """Save config to file"""
+        try:
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+        except:
+            pass
+
+# ==================== JSON MANAGEMENT ====================
+class JSONManager:
+    """Handle JSON file loading"""
+    _items_cache: Optional[Dict] = None
+    _effects_cache: Optional[List] = None
+    
+    @classmethod
+    def load_items(cls) -> Dict:
+        if cls._items_cache is None:
+            with open(resource_path("items.json"), "r") as f:
+                cls._items_cache = json.load(f)
+        assert cls._items_cache is not None
+        return cls._items_cache
+    
+    @classmethod
+    def load_effects(cls) -> List:
+        if cls._effects_cache is None:
+            with open(resource_path("effects.json"), "r") as f:
+                cls._effects_cache = json.load(f)
+        assert cls._effects_cache is not None
+        return cls._effects_cache
+    
+    @classmethod
+    def get_effect_dropdown_list(cls) -> List[str]:
+        effects = cls.load_effects()
+        return [f"{entry['id']} - {entry['Effect']}" for entry in effects]
+    
+    @classmethod
+    def get_item_name_type(cls, item_id_hex: str) -> Tuple[str, str]:
+        items_json = cls.load_items()
+        if item_id_hex in items_json:
+            info = items_json[item_id_hex]
+            return info.get("name", "Unknown"), info.get("type", "?")
+        return "Unknown", "?"
+
+# ==================== UTILITY FUNCTIONS ====================
+def find_value_at_offset(section_data: bytearray, offset: int, byte_size: int) -> Optional[int]:
+    """Extract value from binary data at offset"""
     try:
         value_bytes = section_data[offset:offset+byte_size]
-        if len(value_bytes) == byte_size:
-            return int.from_bytes(value_bytes, 'little')
+        return int.from_bytes(value_bytes, 'little') if len(value_bytes) == byte_size else None
     except IndexError:
-        pass
-    return None
+        return None
 
-def write_le(value, length):
+def write_le(value: int, length: int) -> bytes:
+    """Convert integer to little-endian bytes"""
     if isinstance(value, int):
         return value.to_bytes(length, 'little')
     elif isinstance(value, (bytes, bytearray)):
@@ -98,29 +195,61 @@ def write_le(value, length):
     else:
         raise TypeError(f"Cannot convert type {type(value)} to bytes")
 
-def swap_endian_hex(val):
+def swap_endian_hex(val: int) -> str:
     """Convert item_id to hex string with endian swap"""
     return f"{((val & 0xFF) << 8) | (val >> 8):04X}"
 
 # ==================== FILE OPERATIONS ====================
-def open_file():
-    global data, MODE, decrypted_path, decrypted
+class FileManager:
+    """Handle save file loading and encryption/decryption"""
+    last_opened_file_path: Optional[Path] = None
 
-    file_path = filedialog.askopenfilename(
-        title="Select Save File",
-        filetypes=[("Save Files", "*.BIN"), ("All Files", "*.*")]
-    )
-    if not file_path:
-        return False
+    @staticmethod
+    def _get_save_target_path() -> Optional[Path]:
+        target_path = FileManager.last_opened_file_path
+        if target_path is None:
+            messagebox.showwarning("Warning", "No save file selected")
+            return None
+        return target_path
     
-    file_name = os.path.basename(file_path)
+    @staticmethod
+    def open_file(file_path: Optional[str] = None) -> bool:
+        global data, MODE, decrypted_path, decrypted
 
-    # PC Save
-    if file_name == 'SAVEDATA.BIN':
+        if file_path is None:
+            file_path = filedialog.askopenfilename(
+                title="Select Save File",
+                filetypes=[("Save Files", "*.BIN"), ("All Files", "*.*")]
+            )
+        if not file_path:
+            return False
+
+        selected_path = Path(file_path)
+        if not selected_path.exists():
+            messagebox.showerror("Error", f"Save file not found: {selected_path}")
+            return False
+
+        file_name = Path(file_path).name
+
+        if file_name == 'SAVEDATA.BIN':
+            loaded = FileManager._load_pc_save(file_path)
+        elif file_name == 'APP.BIN':
+            loaded = FileManager._load_ps4_save(file_path)
+        else:
+            messagebox.showerror("Error", "Unknown file. Use SAVEDATA.BIN (PC) or APP.BIN (PS4)")
+            return False
+
+        if loaded:
+            FileManager.last_opened_file_path = selected_path
+        return loaded
+    
+    @staticmethod
+    def _load_pc_save(file_path: str) -> bool:
+        global data, MODE, decrypted_path
         MODE = 'PC'
-        exe_path = base_dir / "pc" / "pc.exe"
+        exe_path = resource_path("PC", "pc.exe")
         
-        proc = subprocess.run(
+        subprocess.run(
             [str(exe_path), file_path],
             cwd=exe_path.parent,
             input="\n",
@@ -132,25 +261,21 @@ def open_file():
         with open(decrypted_path, 'rb') as f:
             data = bytearray(f.read())
         
-        # Disable integrity checks
-        data[0x7B882+0x158] = 0
-        data[0x7B884+0x158] = 0
-        data[0x7B7E4+0x158] = 0
-        data[0xECF4A+0x158] = 0
-        
+        FileManager._disable_integrity_checks(data)
         return True
-
-    # PS4 Save
-    if file_name == 'APP.BIN':
+    
+    @staticmethod
+    def _load_ps4_save(file_path: str) -> bool:
+        global data, MODE, decrypted_path, decrypted
         MODE = 'PS4'
-        exe_path = base_dir / "ps4" / "ps4.exe"
+        exe_path = resource_path("ps4", "ps4.exe")
         dst_path = exe_path.parent / "APP.BIN"
-
+        
         shutil.copy2(file_path, dst_path)
-
+        
         with open(dst_path, 'rb') as f:
             magic_bytes = f.read(4)
-
+        
         if magic_bytes != b'\x00\x00\x00\x00':
             subprocess.run(
                 [str(exe_path), str(dst_path)],
@@ -159,121 +284,54 @@ def open_file():
                 text=True,
                 check=True
             )
-        
             decrypted_path = exe_path.parent / "APP.BIN_out.bin"
         else:
-            decrypted=True
-            decrypted_path = file_path
+            decrypted = True
+            decrypted_path = Path(file_path)
+        
         with open(decrypted_path, 'rb') as f:
             data = bytearray(f.read())
-            # Add 0x148 zero bytes at the start
+        
+        # Add padding for PS4
         padding = b'\x00' * 0x148
         data = bytearray(padding) + data
+        FileManager._disable_integrity_checks(data)
+        return True
+    
+    @staticmethod
+    def _disable_integrity_checks(data: bytearray) -> None:
+        """Disable game integrity checks"""
         data[0x7B882+0x158] = 0
         data[0x7B884+0x158] = 0
         data[0x7B7E4+0x158] = 0
         data[0xECF4A+0x158] = 0
-        
-        return True
-
-    messagebox.showerror("Error", "Unknown file format. Please select SAVEDATA.BIN (PC) or APP.BIN (PS4)")
-    return False
-#import
-def open_file_import():
-    global import_data, IMPORT_MODE, decrypted_path_import, decrypted_import
-
-
-
     
+    @staticmethod
+    def save_file() -> None:
+        global data, decrypted_path
+        
+        if not data:
+            messagebox.showwarning("Warning", "No file loaded")
+            return
 
-    file_path = filedialog.askopenfilename(
-        title="Select Save File",
-        filetypes=[("Save Files", "*.BIN"), ("All Files", "*.*")]
-    )
-    if not file_path:
-        return False
+        if APP_INSTANCE is not None and not APP_INSTANCE.commit_active_editor_changes():
+            return
+        
+        InventoryManager.write_all_to_data()
+        
+        if MODE == 'PC':
+            FileManager._save_pc_file()
+        elif MODE == 'PS4':
+            FileManager._save_ps4_file()
     
-    file_name = os.path.basename(file_path)
+    @staticmethod
+    def _save_pc_file() -> None:
+        target_path = FileManager._get_save_target_path()
+        if target_path is None:
+            return
 
-    # PC Save
-    if file_name == 'SAVEDATA.BIN':
-        IMPORT_MODE = 'PC'
-        exe_path = base_dir / "pc_import" / "pc.exe"
-        
-        proc = subprocess.run(
-            [str(exe_path), file_path],
-            cwd=exe_path.parent,
-            input="\n",
-            text=True,
-            capture_output=True
-        )
-        
-        decrypted_path_import = exe_path.parent / "decr_SAVEDATA.BIN"
-        with open(decrypted_path_import, 'rb') as f:
-            import_data = bytearray(f.read())
-        
-        # Disable integrity checks
-        import_data[0x7B882+0x158] = 0
-        import_data[0x7B884+0x158] = 0
-        import_data[0x7B7E4+0x158] = 0
-        import_data[0xECF4A+0x158] = 0
-        
-        return True
-
-    # PS4 Save
-    if file_name == 'APP.BIN':
-        IMPORT_MODE = 'PS4'
-        exe_path = base_dir / "ps4_import" / "ps4.exe"
-        dst_path = exe_path.parent / "APP.BIN"
-
-        shutil.copy2(file_path, dst_path)
-
-        with open(dst_path, 'rb') as f:
-            magic_bytes = f.read(4)
-
-        if magic_bytes != b'\x00\x00\x00\x00':
-            subprocess.run(
-                [str(exe_path), str(dst_path)],
-                cwd=exe_path.parent,
-                input="\n",
-                text=True,
-                check=True
-            )
-        
-            decrypted_path_import = exe_path.parent / "APP.BIN_out.bin"
-        else:
-            decrypted_import=True
-            decrypted_path_import = file_path
-        with open(decrypted_path_import, 'rb') as f:
-            import_data = bytearray(f.read())
-            # Add 0x148 zero bytes at the start
-        padding = b'\x00' * 0x148
-        import_data = bytearray(padding) + import_data
-        import_data[0x7B882+0x158] = 0
-        import_data[0x7B884+0x158] = 0
-        import_data[0x7B7E4+0x158] = 0
-        import_data[0xECF4A+0x158] = 0
-        
-        return True
-
-    messagebox.showerror("Error", "Unknown file format. Please select SAVEDATA.BIN (PC) or APP.BIN (PS4)")
-    return False
-
-def save_file():
-    global data, decrypted_path
-
-    if data is None or decrypted_path is None:
-        messagebox.showwarning("Warning", "No data to save. Load a file first.")
-        return
-
-    # Write current changes back to data
-    write_weapons_to_data()
-    write_items_to_data()
-    write_scrolls_to_data()
-
-    if MODE == 'PC':
-        with open(decrypted_path, 'wb') as file:
-            file.write(data)
+        with open(decrypted_path, 'wb') as f:
+            f.write(data)
         
         exe_path = base_dir / "pc" / "pc.exe"
         subprocess.run(
@@ -283,36 +341,34 @@ def save_file():
             text=True,
             capture_output=True
         )
+        
+        last_path = exe_path.parent / "decr_decr_SAVEDATA.BIN"
+        with open(last_path, 'rb') as f:
+            final_data = f.read()
 
-        last_path = base_dir / "pc" / "decr_decr_SAVEDATA.BIN"
-        with open(last_path, 'rb') as last:
-            final_data = last.read()
+        with open(target_path, 'wb') as f:
+            f.write(final_data)
+        if APP_INSTANCE is not None:
+            APP_INSTANCE.show_status_message(f"Saved to {target_path}")
+    
+    @staticmethod
+    def _save_ps4_file() -> None:
+        target_path = FileManager._get_save_target_path()
+        if target_path is None:
+            return
 
-        output_path = filedialog.asksaveasfilename(
-            defaultextension=".BIN",
-            filetypes=[("Save Files", "*.BIN"), ("All Files", "*.*")]
-        )
-        if output_path:
-            with open(output_path, 'wb') as file:
-                file.write(final_data)
-            messagebox.showinfo("Success", f"Saved to {output_path}")
-
-    elif MODE == 'PS4':
-        data=data[0x148:]
+        ps4_data = data[0x148:]
+        
         if decrypted:
-            output_path = filedialog.asksaveasfilename(
-                defaultextension=".BIN",
-                filetypes=[("Save Files", "*.BIN"), ("All Files", "*.*")]
-            )
-            with open(output_path, 'wb') as file:
-                file.write(data)
-            messagebox.showinfo("Success", f"Saved to {output_path}")
+            with open(target_path, 'wb') as f:
+                f.write(ps4_data)
+            if APP_INSTANCE is not None:
+                APP_INSTANCE.show_status_message(f"Saved to {target_path}")
             return
         
-        with open(decrypted_path, 'wb') as file:
-            
-            file.write(data)
-
+        with open(decrypted_path, 'wb') as f:
+            f.write(ps4_data)
+        
         exe_path = base_dir / "ps4" / "ps4.exe"
         subprocess.run(
             [str(exe_path), str(decrypted_path)],
@@ -321,628 +377,330 @@ def save_file():
             text=True,
             check=True
         )
-
+        
         dst_path = exe_path.parent / "APP.BIN_out.bin_out.bin"
-        with open(dst_path, 'rb') as lol:
-            final_data = lol.read()
+        with open(dst_path, 'rb') as f:
+            final_data = f.read()
 
-        output_path = filedialog.asksaveasfilename(
-            defaultextension=".BIN",
+        with open(target_path, 'wb') as f:
+            f.write(final_data)
+        if APP_INSTANCE is not None:
+            APP_INSTANCE.show_status_message(f"Saved to {target_path}")
+    
+    @staticmethod
+    def open_file_import() -> bool:
+        global import_data, IMPORT_MODE, decrypted_path_import, decrypted_import
+        
+        file_path = filedialog.askopenfilename(
+            title="Select Save File to Import",
             filetypes=[("Save Files", "*.BIN"), ("All Files", "*.*")]
         )
-        if output_path:
-            with open(output_path, 'wb') as fu:
-                fu.write(final_data)
-            messagebox.showinfo("Success", f"Saved to {output_path}")
-
-# ==================== ORIGINAL PARSING FUNCTIONS ====================
-
-def inventory_par(offset):
-    """Original weapon parsing function"""
-    item_id_1=data[offset:offset+2]
-    offset+= 2
-    item_id_2=data[offset:offset+2]
-    offset+= 2
-    quantity=data[offset:offset+2]
-    offset+= 2
-    weapon_level=data[offset:offset+2]
-    offset+= 2
-    weapon_level_start=data[offset:offset+2]
-    offset+= 2
-    Higher_Level_Modifier=data[offset:offset+2]
-    offset+= 2
-    fam=data[offset:offset+4]
-    offset+=4
-    left_right_1=data[offset:offset+1]
-    offset+=1
-    left_right_2=data[offset:offset+1]
-    offset+=1
-    left_right_3=data[offset:offset+1]
-    offset+=1
-    left_right_4=data[offset:offset+1]
-    offset+=1
-    weapon_tier=data[offset:offset+1]
-    offset+=1
-    left_right_5=data[offset:offset+1]
-    offset+=1
-    left_right_6=data[offset:offset+1]
-    offset+=1
-    left_right_7=data[offset:offset+1]
-    offset+=1
-    yokai_weapon_gauge=data[offset:offset+2]
-    offset+= 2
-    rcmd_level=data[offset:offset+2]
-    offset+= 2
-    empty_1=data[offset:offset+2]
-    offset+= 2
-    remodel_type=data[offset:offset+1]
-    offset+=1
-    attempt_remaining=data[offset:offset+1]
-    offset+=1
-    extra_1=data[offset:offset+16]
-    offset+=16
-    effect_id_1=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_1=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_1=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_1=data[offset:offset+2]
-    offset+=2
-    
-    effect_id_2=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_2=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_2=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_2=data[offset:offset+2]
-    offset+=2
-
-    effect_id_3=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_3=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_3=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_3=data[offset:offset+2]
-    offset+=2
-
-    effect_id_4=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_4=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_4=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_4=data[offset:offset+2]
-    offset+=2
-
-    effect_id_5=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_5=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_5=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_5=data[offset:offset+2]
-    offset+=2
-
-    effect_id_6=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_6=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_6=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_6=data[offset:offset+2]
-    offset+=2
-
-    effect_id_7=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_7=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_7=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_7=data[offset:offset+2]
-    offset+=2
-
-    empty_2=data[offset:offset+4]
-    offset+=4
-
-    is_equiped=data[offset:offset+1]
-    offset+=1
-
-    empty_3=data[offset:offset+7]
-    offset+=7
-
-    return {
-        'item_id_1': int.from_bytes(item_id_1, 'little'),
-        'Refashion': int.from_bytes(item_id_2, 'little'),
-        'quantity': int.from_bytes(quantity, 'little'),
-        'weapon_level': int.from_bytes(weapon_level, 'little'),
-        'weapon_level_start': int.from_bytes(weapon_level_start, 'little'),
-        'Higher_Level_Modifier': int.from_bytes(Higher_Level_Modifier, 'little'),
-        'fam': int.from_bytes(fam, 'little'),
-        'left_right_1': int.from_bytes(left_right_1, 'little'),
-        'left_right_2': int.from_bytes(left_right_2, 'little'),
-        'left_right_3': int.from_bytes(left_right_3, 'little'),
-        'left_right_4': int.from_bytes(left_right_4, 'little'),
-        'weapon_tier': int.from_bytes(weapon_tier, 'little'),
-        'left_right_5': int.from_bytes(left_right_5, 'little'),
-        'left_right_6': int.from_bytes(left_right_6, 'little'),
-        'left_right_7': int.from_bytes(left_right_7, 'little'),
-        'yokai_weapon_gauge': int.from_bytes(yokai_weapon_gauge, 'little'),
-        'rcmd_level': int.from_bytes(rcmd_level, 'little'),
-        'empty_1': int.from_bytes(empty_1, 'little'),
-        'remodel_type': int.from_bytes(remodel_type, 'little'),
-        'attempt_remaining': int.from_bytes(attempt_remaining, 'little'),
-        'extra_1': int.from_bytes(extra_1, 'little'),
-        'effect_id_1': int.from_bytes(effect_id_1, 'little'),
-        'effect_magnitude_1': int.from_bytes(effect_magnitude_1, 'little'),
-        'effect_footer_part1_1': int.from_bytes(effect_footer_part1_1, 'little'),
-        'effect_footer_part2_1': int.from_bytes(effect_footer_part2_1, 'little'),
-        'effect_id_2': int.from_bytes(effect_id_2, 'little'),
-        'effect_magnitude_2': int.from_bytes(effect_magnitude_2, 'little'),
-        'effect_footer_part1_2': int.from_bytes(effect_footer_part1_2, 'little'),
-        'effect_footer_part2_2': int.from_bytes(effect_footer_part2_2, 'little'),
-        'effect_id_3': int.from_bytes(effect_id_3, 'little'),
-        'effect_magnitude_3': int.from_bytes(effect_magnitude_3, 'little'),
-        'effect_footer_part1_3': int.from_bytes(effect_footer_part1_3, 'little'),
-        'effect_footer_part2_3': int.from_bytes(effect_footer_part2_3, 'little'),
-        'effect_id_4': int.from_bytes(effect_id_4, 'little'),
-        'effect_magnitude_4': int.from_bytes(effect_magnitude_4, 'little'),
-        'effect_footer_part1_4': int.from_bytes(effect_footer_part1_4, 'little'),
-        'effect_footer_part2_4': int.from_bytes(effect_footer_part2_4, 'little'),
-        'effect_id_5': int.from_bytes(effect_id_5, 'little'),
-        'effect_magnitude_5': int.from_bytes(effect_magnitude_5, 'little'),
-        'effect_footer_part1_5': int.from_bytes(effect_footer_part1_5, 'little'),
-        'effect_footer_part2_5': int.from_bytes(effect_footer_part2_5, 'little'),
-        'effect_id_6': int.from_bytes(effect_id_6, 'little'),
-        'effect_magnitude_6': int.from_bytes(effect_magnitude_6, 'little'),
-        'effect_footer_part1_6': int.from_bytes(effect_footer_part1_6, 'little'),
-        'effect_footer_part2_6': int.from_bytes(effect_footer_part2_6, 'little'),
-        'effect_id_7': int.from_bytes(effect_id_7, 'little'),
-        'effect_magnitude_7': int.from_bytes(effect_magnitude_7, 'little'),
-        'effect_footer_part1_7': int.from_bytes(effect_footer_part1_7, 'little'),
-        'effect_footer_part2_7': int.from_bytes(effect_footer_part2_7, 'little'),
-        'empty_2': int.from_bytes(empty_2, 'little'),
-        'is_equiped': int.from_bytes(is_equiped, 'little'),
-        'empty_3': int.from_bytes(empty_3, 'little'),
-        'offset': offset
-    }
-
-def inventory_par_items(offset):
-    """Original items parsing function"""
-    item_id_1=data[offset:offset+2]
-    offset+= 2
-    item_id_2=data[offset:offset+2]
-    offset+= 2
-    quantity=data[offset:offset+2]
-    offset+= 2
-    weapon_level=data[offset:offset+2]
-    offset+= 2
-    weapon_level_start=data[offset:offset+2]
-    offset+= 2
-    Higher_Level_Modifier=data[offset:offset+2]
-    offset+= 2
-    fam=data[offset:offset+4]
-    offset+=4
-    left_right_1=data[offset:offset+1]
-    offset+=1
-    left_right_2=data[offset:offset+1]
-    offset+=1
-    left_right_3=data[offset:offset+1]
-    offset+=1
-    left_right_4=data[offset:offset+1]
-    offset+=1
-    weapon_tier=data[offset:offset+1]
-    offset+=1
-    left_right_5=data[offset:offset+1]
-    offset+=1
-    left_right_6=data[offset:offset+1]
-    offset+=1
-    left_right_7=data[offset:offset+1]
-    offset+=1
-    yokai_weapon_gauge=data[offset:offset+2]
-    offset+= 2
-    rcmd_level=data[offset:offset+2]
-    offset+= 2
-    empty_1=data[offset:offset+2]
-    offset+= 2
-    remodel_type=data[offset:offset+1]
-    offset+=1
-    attempt_remaining=data[offset:offset+1]
-    offset+=1
-    extra_1=data[offset:offset+16]
-    offset+=16
-    effect_id_1=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_1=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_1=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_1=data[offset:offset+2]
-    offset+=2
-    
-    effect_id_2=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_2=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_2=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_2=data[offset:offset+2]
-    offset+=2
-
-    effect_id_3=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_3=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_3=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_3=data[offset:offset+2]
-    offset+=2
-
-    effect_id_4=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_4=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_4=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_4=data[offset:offset+2]
-    offset+=2
-
-    effect_id_5=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_5=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_5=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_5=data[offset:offset+2]
-    offset+=2
-
-    effect_id_6=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_6=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_6=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_6=data[offset:offset+2]
-    offset+=2
-
-    effect_id_7=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_7=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_7=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_7=data[offset:offset+2]
-    offset+=2
-
-    empty_2=data[offset:offset+4]
-    offset+=4
-
-    return {
-        'item_id_1': int.from_bytes(item_id_1, 'little'),
-        'Refashion': int.from_bytes(item_id_2, 'little'),
-        'quantity': int.from_bytes(quantity, 'little'),
-        'offset': offset
-    }
-
-def inventory_par_scroll(offset):
-    """Original scroll parsing function"""
-    item_id_1=data[offset:offset+2]
-    offset+= 2
-    item_id_2=data[offset:offset+2]
-    offset+= 2
-    item_id_3=data[offset:offset+2]
-    offset+= 2
-    item_level_1=data[offset:offset+2]
-    offset+= 2
-    item_level_2=data[offset:offset+2]
-    offset+= 2
-    higher_level_mod=data[offset:offset+2]
-    offset+= 2
-    unk_1=data[offset:offset+4]
-    offset+= 4
-    extra_1=data[offset:offset+2]
-    offset+= 2
-    is_it_locked=data[offset:offset+1]
-    offset+= 1
-    extra_2=data[offset:offset+1]
-    offset+= 1
-    tier=data[offset:offset+1]
-    offset+= 1
-    unk_2=data[offset:offset+1]
-    offset+= 1
-    unk_3=data[offset:offset+9]
-    offset+= 9
-    attempts_remaining=data[offset:offset+1]
-    offset+= 1
-    unk_4=data[offset:offset+16]
-    offset+= 16
-
-    effect_id_1=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_1=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_1=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_1=data[offset:offset+2]
-    offset+=2
-    
-    effect_id_2=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_2=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_2=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_2=data[offset:offset+2]
-    offset+=2
-
-    effect_id_3=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_3=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_3=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_3=data[offset:offset+2]
-    offset+=2
-
-    effect_id_4=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_4=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_4=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_4=data[offset:offset+2]
-    offset+=2
-
-    effect_id_5=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_5=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_5=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_5=data[offset:offset+2]
-    offset+=2
-
-    effect_id_6=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_6=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_6=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_6=data[offset:offset+2]
-    offset+=2
-
-    effect_id_7=data[offset:offset+4]
-    offset+=4
-    effect_magnitude_7=data[offset:offset+4]
-    offset+=4
-    effect_footer_part1_7=data[offset:offset+2]
-    offset+=2
-    effect_footer_part2_7=data[offset:offset+2]
-    offset+=2
-    extra_3=data[offset:offset+4]
-    offset+=4
-
-    return {
-        'item_id_1': int.from_bytes(item_id_1, 'little'),
-        'item_id_2': int.from_bytes(item_id_2, 'little'),
-        'item_id_3': int.from_bytes(item_id_3, 'little'),
-        'item_level_1': int.from_bytes(item_level_1, 'little'),
-        'item_level_2': int.from_bytes(item_level_2, 'little'),
-        'higher_level_mod': int.from_bytes(higher_level_mod, 'little'),
-        'unk_1': int.from_bytes(unk_1, 'little'),
-        'extra_1': int.from_bytes(extra_1, 'little'),
-        'is_it_locked': int.from_bytes(is_it_locked, 'little'),
-        'extra_2': int.from_bytes(extra_2, 'little'),
-        'tier': int.from_bytes(tier, 'little'),
-        'unk_2': int.from_bytes(unk_2, 'little'),
-        'unk_3': int.from_bytes(unk_3, 'little'),
-        'attempts_remaining': int.from_bytes(attempts_remaining, 'little'),
-        'unk_4': int.from_bytes(unk_4, 'little') ,
-        'effect_id_1': int.from_bytes(effect_id_1, 'little'),
-        'effect_magnitude_1': int.from_bytes(effect_magnitude_1, 'little'),
-        'effect_footer_part1_1': int.from_bytes(effect_footer_part1_1, 'little'),
-        'effect_footer_part2_1': int.from_bytes(effect_footer_part2_1, 'little'),
-        'effect_id_2': int.from_bytes(effect_id_2, 'little'),
-        'effect_magnitude_2': int.from_bytes(effect_magnitude_2, 'little'),
-        'effect_footer_part1_2': int.from_bytes(effect_footer_part1_2, 'little'),
-        'effect_footer_part2_2': int.from_bytes(effect_footer_part2_2, 'little'),
-        'effect_id_3': int.from_bytes(effect_id_3, 'little'),
-        'effect_magnitude_3': int.from_bytes(effect_magnitude_3, 'little'),
-        'effect_footer_part1_3': int.from_bytes(effect_footer_part1_3, 'little'),
-        'effect_footer_part2_3': int.from_bytes(effect_footer_part2_3, 'little'),
-        'effect_id_4': int.from_bytes(effect_id_4, 'little'),
-        'effect_magnitude_4': int.from_bytes(effect_magnitude_4, 'little'),
-        'effect_footer_part1_4': int.from_bytes(effect_footer_part1_4, 'little'),
-        'effect_footer_part2_4': int.from_bytes(effect_footer_part2_4, 'little'),
-        'effect_id_5': int.from_bytes(effect_id_5, 'little'),
-        'effect_magnitude_5': int.from_bytes(effect_magnitude_5, 'little'),
-        'effect_footer_part1_5': int.from_bytes(effect_footer_part1_5, 'little'),
-        'effect_footer_part2_5': int.from_bytes(effect_footer_part2_5, 'little'),
-        'effect_id_6': int.from_bytes(effect_id_6, 'little'),
-        'effect_magnitude_6': int.from_bytes(effect_magnitude_6, 'little'),
-        'effect_footer_part1_6': int.from_bytes(effect_footer_part1_6, 'little'),
-        'effect_footer_part2_6': int.from_bytes(effect_footer_part2_6, 'little'),
-        'effect_id_7': int.from_bytes(effect_id_7, 'little'),
-        'effect_magnitude_7': int.from_bytes(effect_magnitude_7, 'little'),
-        'effect_footer_part1_7': int.from_bytes(effect_footer_part1_7, 'little'),
-        'effect_footer_part2_7': int.from_bytes(effect_footer_part2_7, 'little'),
-        'extra_3': int.from_bytes(extra_3, 'little'),
-        'offset': offset
-    }
-
-def player_weapons():
-    global weapons
-    weapons = []
-    for slot in range(WEAPON_SLOTS):
-        offset = WEAPON_START + (slot * WEAPON_SIZE)
-        weapon = inventory_par(offset)
-        weapon['slot'] = slot
-        weapons.append(weapon)
-
-def player_items():
-    global items
-    items = []
-    for slot in range(ITEM_SLOTS):
-        offset = ITEM_START + (slot * ITEM_SIZE)
-        item = inventory_par_items(offset)
-        item['slot'] = slot
-        items.append(item)
-
-def player_scroll():
-    global scrolls
-    scrolls = []
-    for slot in range(SCROLL_SLOTS):
-        offset = SCROLL_START + (slot * SCROLL_SIZE)
-        if offset + SCROLL_SIZE > len(data):
-            break
+        if not file_path:
+            return False
         
-        # Check if slot has data (item_id_1 is not 0)
-        item_id_check = int.from_bytes(data[offset:offset+2], 'little')
-        if item_id_check == 0:
-            continue  # Skip empty slots
+        file_name = Path(file_path).name
+        
+        if file_name == 'SAVEDATA.BIN':
+            IMPORT_MODE = 'PC'
+            exe_path = resource_path("PC_import", "pc.exe")
             
-        scroll = inventory_par_scroll(offset)
-        scroll['slot'] = slot
-        scrolls.append(scroll)
+            subprocess.run(
+                [str(exe_path), file_path],
+                cwd=exe_path.parent,
+                input="\n",
+                text=True,
+                capture_output=True
+            )
+            
+            decrypted_path_import = exe_path.parent / "decr_SAVEDATA.BIN"
+            with open(decrypted_path_import, 'rb') as f:
+                import_data = bytearray(f.read())
+            
+            FileManager._disable_integrity_checks(import_data)
+            return True
+        
+        elif file_name == 'APP.BIN':
+            IMPORT_MODE = 'PS4'
+            exe_path = resource_path("PS4_import", "ps4.exe")
+            dst_path = exe_path.parent / "APP.BIN"
+            
+            shutil.copy2(file_path, dst_path)
+            
+            with open(dst_path, 'rb') as f:
+                magic_bytes = f.read(4)
+            
+            if magic_bytes != b'\x00\x00\x00\x00':
+                subprocess.run(
+                    [str(exe_path), str(dst_path)],
+                    cwd=exe_path.parent,
+                    input="\n",
+                    text=True,
+                    check=True
+                )
+                decrypted_path_import = exe_path.parent / "APP.BIN_out.bin"
+            else:
+                decrypted_import = True
+                decrypted_path_import = Path(file_path)
+            
+            with open(decrypted_path_import, 'rb') as f:
+                import_data = bytearray(f.read())
+            
+            padding = b'\x00' * 0x148
+            import_data = bytearray(padding) + import_data
+            FileManager._disable_integrity_checks(import_data)
+            return True
+        else:
+            messagebox.showerror("Error", "Unknown file. Use SAVEDATA.BIN (PC) or APP.BIN (PS4)")
+            return False
 
-def write_weapons_to_data():
-    """Write weapons back to data"""
-    for weapon in weapons:
-        slot = weapon['slot']
-        
-        offset = WEAPON_START + (slot * WEAPON_SIZE)
-        
-        data[offset:offset+2] = write_le(weapon['item_id_1'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(weapon['Refashion'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(weapon['quantity'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(weapon['weapon_level'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(weapon['weapon_level_start'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(weapon['Higher_Level_Modifier'], 2)
-        offset += 2
-        data[offset:offset+4] = write_le(weapon['fam'], 4)
-        offset += 4
-        data[offset:offset+1] = write_le(weapon['left_right_1'], 1)
-        offset += 1
-        data[offset:offset+1] = write_le(weapon['left_right_2'], 1)
-        offset += 1
-        data[offset:offset+1] = write_le(weapon['left_right_3'], 1)
-        offset += 1
-        data[offset:offset+1] = write_le(weapon['left_right_4'], 1)
-        offset += 1
-        data[offset:offset+1] = write_le(weapon['weapon_tier'], 1)
-        offset += 1
-        data[offset:offset+1] = write_le(weapon['left_right_5'], 1)
-        offset += 1
-        data[offset:offset+1] = write_le(weapon['left_right_6'], 1)
-        offset += 1
-        data[offset:offset+1] = write_le(weapon['left_right_7'], 1)
-        offset += 1
-        data[offset:offset+2] = write_le(weapon['yokai_weapon_gauge'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(weapon['rcmd_level'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(weapon['empty_1'], 2)
-        offset += 2
-        data[offset:offset+1] = write_le(weapon['remodel_type'], 1)
-        offset += 1
-        data[offset:offset+1] = write_le(weapon['attempt_remaining'], 1)
-        offset += 1
-        data[offset:offset+16] = write_le(weapon['extra_1'], 16)
-        offset += 16
-        
-        # Effects
-        for i in range(1, 8):
-            data[offset:offset+4] = write_le(weapon[f'effect_id_{i}'], 4)
-            offset += 4
-            data[offset:offset+4] = write_le(weapon[f'effect_magnitude_{i}'], 4)
-            offset += 4
-            data[offset:offset+2] = write_le(weapon[f'effect_footer_part1_{i}'], 2)
-            offset += 2
-            data[offset:offset+2] = write_le(weapon[f'effect_footer_part2_{i}'], 2)
-            offset += 2
-
-def write_items_to_data():
-    """Write items back to data"""
-    for item in items:
-        slot = item['slot']
-        offset = ITEM_START + (slot * ITEM_SIZE)
-        
-        data[offset:offset+2] = write_le(item['item_id_1'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(item['Refashion'], 2)
-        offset += 2
-        data[offset:offset+2] = write_le(item['quantity'], 2)
-
-def write_scrolls_to_data():
-    """Write scrolls back to data"""
-    for scroll in scrolls:
-        slot = scroll['slot']
-        offset = SCROLL_START + (slot * SCROLL_SIZE)
-        
-        # Don't write beyond the original file size
-        if offset + SCROLL_SIZE > len(data):
-            print(f"Skipping scroll slot {slot} write: exceeds data size")
-            continue
-        
-        # Write directly to data (like write_weapons_to_data does)
-        data[offset:offset+2] = write_le(scroll['item_id_1'], 2); offset += 2
-        data[offset:offset+2] = write_le(scroll['item_id_2'], 2); offset += 2
-        data[offset:offset+2] = write_le(scroll['item_id_3'], 2); offset += 2
-        data[offset:offset+2] = write_le(scroll['item_level_1'], 2); offset += 2
-        data[offset:offset+2] = write_le(scroll['item_level_2'], 2); offset += 2
-        data[offset:offset+2] = write_le(scroll['higher_level_mod'], 2); offset += 2
-        data[offset:offset+4] = write_le(scroll['unk_1'], 4); offset += 4
-        data[offset:offset+2] = write_le(scroll['extra_1'], 2); offset += 2
-        data[offset:offset+1] = write_le(scroll['is_it_locked'], 1); offset += 1
-        data[offset:offset+1] = write_le(scroll['extra_2'], 1); offset += 1
-        data[offset:offset+1] = write_le(scroll['tier'], 1); offset += 1
-        data[offset:offset+1] = write_le(scroll['unk_2'], 1); offset += 1
-        data[offset:offset+9] = write_le(scroll['unk_3'], 9); offset += 9
-        data[offset:offset+1] = write_le(scroll['attempts_remaining'], 1); offset += 1
-        data[offset:offset+16] = write_le(scroll['unk_4'], 16); offset += 16
-
-        # Effects
-        for i in range(1, 8):
-            data[offset:offset+4] = write_le(scroll[f'effect_id_{i}'], 4); offset += 4
-            data[offset:offset+4] = write_le(scroll[f'effect_magnitude_{i}'], 4); offset += 4
-            data[offset:offset+2] = write_le(scroll[f'effect_footer_part1_{i}'], 2); offset += 2
-            data[offset:offset+2] = write_le(scroll[f'effect_footer_part2_{i}'], 2); offset += 2
-        
-        data[offset:offset+4] = write_le(scroll['extra_3'], 4)
 
 def import_save():
-    global data
-    open_file_import()
-
-    if not data:
-        messagebox.showerror("Error", "Please load your current save file first and then click import")
+    global data, import_data
+    
+    if not FileManager.open_file_import():
         return
-
-    ask=messagebox.askyesno("Confirm", "This will replace your current character")
-    if ask:
-        data=data[:0x178] + import_data[0x178:]
+    
+    if not data:
+        messagebox.showerror("Error", "Load your current save first")
+        return
+    
+    if messagebox.askyesno("Confirm", "Replace current character?"):
+        data = data[:0x178] + import_data[0x178:]
         if len(data) != 0x296F28:
-            messagebox.showerror('Importing Error', 'size missmatch ')
-        messagebox.showinfo("Success", "File imported correctly. When you load in, it will update the character ingame")
-    else:
-        return None
+            messagebox.showerror('Error', 'Size mismatch')
+        messagebox.showinfo("Success", "File imported. Changes apply on next game load.")
 
+# ==================== INVENTORY PARSING ====================
+class InventoryParser:
+    """Parse binary inventory data efficiently"""
+    
+    @staticmethod
+    def parse_weapon(offset: int) -> Dict:
+        """Parse weapon data from binary"""
+        o = offset
+        weapon = {}
+        
+        # Parse all fields efficiently
+        weapon['item_id_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['Refashion'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['quantity'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['weapon_level'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['weapon_level_start'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['Higher_Level_Modifier'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['fam'] = int.from_bytes(data[o:o+4], 'little'); o += 4
 
+        weapon['left_right_1'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['left_right_2'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['left_right_3'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['left_right_4'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['weapon_tier'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['left_right_5'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['left_right_6'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['left_right_7'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        
+        weapon['yokai_weapon_gauge'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['rcmd_level'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['empty_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        weapon['remodel_type'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['attempt_remaining'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['extra_1'] = int.from_bytes(data[o:o+16], 'little'); o += 16
+        
+        # Effects
+        for i in range(1, 8):
+            weapon[f'effect_id_{i}'] = int.from_bytes(data[o:o+4], 'little'); o += 4
+            weapon[f'effect_magnitude_{i}'] = int.from_bytes(data[o:o+4], 'little'); o += 4
+            weapon[f'effect_footer_part1_{i}'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+            weapon[f'effect_footer_part2_{i}'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        
+        weapon['empty_2'] = int.from_bytes(data[o:o+4], 'little'); o += 4
+        weapon['is_equiped'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        weapon['empty_3'] = int.from_bytes(data[o:o+7], 'little'); o += 7
+        weapon['offset'] = offset
+        
+        return weapon
+    
+    @staticmethod
+    def parse_item(offset: int) -> Dict:
+        """Parse item data from binary"""
+        o = offset
+        item = {}
+        
+        item['item_id_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        item['Refashion'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        item['quantity'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        item['offset'] = offset
+        
+        return item
+    
+    @staticmethod
+    def parse_scroll(offset: int) -> Dict:
+        """Parse scroll data from binary"""
+        o = offset
+        scroll = {}
+        
+        scroll['item_id_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        scroll['item_id_2'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        scroll['item_id_3'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        scroll['item_level_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        scroll['item_level_2'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        scroll['higher_level_mod'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        scroll['unk_1'] = int.from_bytes(data[o:o+4], 'little'); o += 4
+        scroll['extra_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        scroll['is_it_locked'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        scroll['extra_2'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        scroll['tier'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        scroll['unk_2'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        scroll['unk_3'] = int.from_bytes(data[o:o+9], 'little'); o += 9
+        scroll['attempts_remaining'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        scroll['unk_4'] = int.from_bytes(data[o:o+16], 'little'); o += 16
+        
+        for i in range(1, 8):
+            scroll[f'effect_id_{i}'] = int.from_bytes(data[o:o+4], 'little'); o += 4
+            scroll[f'effect_magnitude_{i}'] = int.from_bytes(data[o:o+4], 'little'); o += 4
+            scroll[f'effect_footer_part1_{i}'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+            scroll[f'effect_footer_part2_{i}'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        
+        scroll['extra_3'] = int.from_bytes(data[o:o+4], 'little'); o += 4
+        scroll['offset'] = offset
+        
+        return scroll
+
+class InventoryManager:
+    """Manage inventory data efficiently"""
+    
+    @staticmethod
+    def load_weapons() -> None:
+        global weapons
+        weapons = []
+        for slot in range(InventorySize.WEAPON_SLOTS.value):
+            offset = Offsets.WEAPON_START.value + (slot * InventorySize.WEAPON_SIZE.value)
+            weapon = InventoryParser.parse_weapon(offset)
+            weapon['slot'] = slot
+            weapons.append(weapon)
+    
+    @staticmethod
+    def load_items() -> None:
+        global items
+        items = []
+        for slot in range(InventorySize.ITEM_SLOTS.value):
+            offset = Offsets.ITEM_START.value + (slot * InventorySize.ITEM_SIZE.value)
+            item = InventoryParser.parse_item(offset)
+            item['slot'] = slot
+            items.append(item)
+    
+    @staticmethod
+    def load_scrolls() -> None:
+        global scrolls
+        scrolls = []
+        for slot in range(InventorySize.SCROLL_SLOTS.value):
+            offset = Offsets.SCROLL_START.value + (slot * InventorySize.SCROLL_SIZE.value)
+            if offset + InventorySize.SCROLL_SIZE.value > len(data):
+                break
+            
+            if int.from_bytes(data[offset:offset+2], 'little') == 0:
+                continue
+            
+            scroll = InventoryParser.parse_scroll(offset)
+            scroll['slot'] = slot
+            scrolls.append(scroll)
+    
+    @staticmethod
+    def write_all_to_data() -> None:
+        InventoryManager.write_weapons_to_data()
+        InventoryManager.write_items_to_data()
+        InventoryManager.write_scrolls_to_data()
+    
+    @staticmethod
+    def write_weapons_to_data() -> None:
+        for weapon in weapons:
+            slot, offset = weapon['slot'], Offsets.WEAPON_START.value + (weapon['slot'] * InventorySize.WEAPON_SIZE.value)
+            o = offset
+            
+            data[o:o+2] = write_le(weapon['item_id_1'], 2); o += 2
+            data[o:o+2] = write_le(weapon['Refashion'], 2); o += 2
+            data[o:o+2] = write_le(weapon['quantity'], 2); o += 2
+            data[o:o+2] = write_le(weapon['weapon_level'], 2); o += 2
+            data[o:o+2] = write_le(weapon['weapon_level_start'], 2); o += 2
+            data[o:o+2] = write_le(weapon['Higher_Level_Modifier'], 2); o += 2
+            data[o:o+4] = write_le(weapon['fam'], 4); o += 4
+
+            data[o:o+1] = write_le(weapon['left_right_1'], 1); o += 1
+            data[o:o+1] = write_le(weapon['left_right_2'], 1); o += 1
+            data[o:o+1] = write_le(weapon['left_right_3'], 1); o += 1
+            data[o:o+1] = write_le(weapon['left_right_4'], 1); o += 1
+            data[o:o+1] = write_le(weapon['weapon_tier'], 1); o += 1
+            data[o:o+1] = write_le(weapon['left_right_5'], 1); o += 1
+            data[o:o+1] = write_le(weapon['left_right_6'], 1); o += 1
+            data[o:o+1] = write_le(weapon['left_right_7'], 1); o += 1
+            
+            data[o:o+2] = write_le(weapon['yokai_weapon_gauge'], 2); o += 2
+            data[o:o+2] = write_le(weapon['rcmd_level'], 2); o += 2
+            data[o:o+2] = write_le(weapon['empty_1'], 2); o += 2
+            data[o:o+1] = write_le(weapon['remodel_type'], 1); o += 1
+            data[o:o+1] = write_le(weapon['attempt_remaining'], 1); o += 1
+            data[o:o+16] = write_le(weapon['extra_1'], 16); o += 16
+            
+            for i in range(1, 8):
+                data[o:o+4] = write_le(weapon[f'effect_id_{i}'], 4); o += 4
+                data[o:o+4] = write_le(weapon[f'effect_magnitude_{i}'], 4); o += 4
+                data[o:o+2] = write_le(weapon[f'effect_footer_part1_{i}'], 2); o += 2
+                data[o:o+2] = write_le(weapon[f'effect_footer_part2_{i}'], 2); o += 2
+            
+            data[o:o+4] = write_le(weapon['empty_2'], 4); o += 4
+            data[o:o+1] = write_le(weapon['is_equiped'], 1); o += 1
+            data[o:o+7] = write_le(weapon['empty_3'], 7)
+    
+    @staticmethod
+    def write_items_to_data() -> None:
+        for item in items:
+            offset = Offsets.ITEM_START.value + (item['slot'] * InventorySize.ITEM_SIZE.value)
+            o = offset
+            
+            data[o:o+2] = write_le(item['item_id_1'], 2); o += 2
+            data[o:o+2] = write_le(item['Refashion'], 2); o += 2
+            data[o:o+2] = write_le(item['quantity'], 2)
+    
+    @staticmethod
+    def write_scrolls_to_data() -> None:
+        for scroll in scrolls:
+            offset = Offsets.SCROLL_START.value + (scroll['slot'] * InventorySize.SCROLL_SIZE.value)
+            o = offset
+            
+            data[o:o+2] = write_le(scroll['item_id_1'], 2); o += 2
+            data[o:o+2] = write_le(scroll['item_id_2'], 2); o += 2
+            data[o:o+2] = write_le(scroll['item_id_3'], 2); o += 2
+            data[o:o+2] = write_le(scroll['item_level_1'], 2); o += 2
+            data[o:o+2] = write_le(scroll['item_level_2'], 2); o += 2
+            data[o:o+2] = write_le(scroll['higher_level_mod'], 2); o += 2
+            data[o:o+4] = write_le(scroll['unk_1'], 4); o += 4
+            data[o:o+2] = write_le(scroll['extra_1'], 2); o += 2
+            data[o:o+1] = write_le(scroll['is_it_locked'], 1); o += 1
+            data[o:o+1] = write_le(scroll['extra_2'], 1); o += 1
+            data[o:o+1] = write_le(scroll['tier'], 1); o += 1
+            data[o:o+1] = write_le(scroll['unk_2'], 1); o += 1
+            data[o:o+9] = write_le(scroll['unk_3'], 9); o += 9
+            data[o:o+1] = write_le(scroll['attempts_remaining'], 1); o += 1
+            data[o:o+16] = write_le(scroll['unk_4'], 16); o += 16
+            
+            for i in range(1, 8):
+                data[o:o+4] = write_le(scroll[f'effect_id_{i}'], 4); o += 4
+                data[o:o+4] = write_le(scroll[f'effect_magnitude_{i}'], 4); o += 4
+                data[o:o+2] = write_le(scroll[f'effect_footer_part1_{i}'], 2); o += 2
+                data[o:o+2] = write_le(scroll[f'effect_footer_part2_{i}'], 2); o += 2
+            
+            data[o:o+4] = write_le(scroll['extra_3'], 4)
+
+# ==================== CUSTOM WIDGETS ====================
 class SearchableCombobox(ttk.Frame):
+    """Reusable searchable combobox widget"""
+    
     def __init__(self, master=None, values=None, width=40, **kwargs):
         super().__init__(master, **kwargs)
         
         self.full_values = values if values else []
         self.filtered_values = self.full_values.copy()
         
-        # Entry field
+        # Entry
         self.var = tk.StringVar()
         self.entry = ttk.Entry(self, textvariable=self.var, width=width)
         self.entry.pack(side="left", fill="x", expand=True)
@@ -951,7 +709,7 @@ class SearchableCombobox(ttk.Frame):
         self.btn = ttk.Button(self, text="▼", width=2, command=self.toggle_dropdown)
         self.btn.pack(side="right")
         
-        # Listbox for dropdown (hidden by default)
+        # Dropdown frame
         self.listbox_frame = tk.Toplevel(self)
         self.listbox_frame.withdraw()
         self.listbox_frame.overrideredirect(True)
@@ -970,58 +728,42 @@ class SearchableCombobox(ttk.Frame):
         self.entry.bind("<Return>", self._on_return)
         self.entry.bind("<Escape>", self._on_escape)
         self.entry.bind("<FocusOut>", self._on_focus_out)
-        
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
         self.listbox.bind("<Return>", self._on_return)
         self.listbox.bind("<Escape>", self._on_escape)
         self.listbox.bind("<Double-Button-1>", self._on_select)
         
         self.dropdown_visible = False
-        
+    
     def _on_type(self, *args):
-        """Filter values as user types"""
+        if getattr(self, '_silent', False):
+            return
         typed = self.var.get().lower()
-        
-        if typed == "":
-            self.filtered_values = self.full_values.copy()
-        else:
-            self.filtered_values = [v for v in self.full_values if typed in v.lower()]
-        
+        self.filtered_values = self.full_values.copy() if not typed else [v for v in self.full_values if typed in v.lower()]
         self._update_listbox()
-        
-        # Show dropdown automatically when typing
         if not self.dropdown_visible and self.filtered_values:
             self.show_dropdown()
     
     def _update_listbox(self):
-        """Update listbox with filtered values"""
         self.listbox.delete(0, tk.END)
         for value in self.filtered_values:
             self.listbox.insert(tk.END, value)
     
     def show_dropdown(self):
-        """Show the dropdown listbox"""
         if not self.filtered_values:
             return
-            
         self.dropdown_visible = True
-        
-        # Position the dropdown below the entry
-        x = self.entry.winfo_rootx()
-        y = self.entry.winfo_rooty() + self.entry.winfo_height()
+        x, y = self.entry.winfo_rootx(), self.entry.winfo_rooty() + self.entry.winfo_height()
         width = self.entry.winfo_width() + self.btn.winfo_width()
-        
         self.listbox_frame.geometry(f"{width}x200+{x}+{y}")
         self.listbox_frame.deiconify()
         self.listbox_frame.lift()
-        
+    
     def hide_dropdown(self):
-        """Hide the dropdown listbox"""
         self.dropdown_visible = False
         self.listbox_frame.withdraw()
     
     def toggle_dropdown(self):
-        """Toggle dropdown visibility"""
         if self.dropdown_visible:
             self.hide_dropdown()
         else:
@@ -1031,7 +773,6 @@ class SearchableCombobox(ttk.Frame):
             self.entry.focus_set()
     
     def _on_arrow_down(self, event):
-        """Move selection down in listbox"""
         if not self.dropdown_visible:
             self.show_dropdown()
         else:
@@ -1045,7 +786,6 @@ class SearchableCombobox(ttk.Frame):
         return "break"
     
     def _on_arrow_up(self, event):
-        """Move selection up in listbox"""
         if self.dropdown_visible:
             current = self.listbox.curselection()
             if current and current[0] > 0:
@@ -1055,7 +795,6 @@ class SearchableCombobox(ttk.Frame):
         return "break"
     
     def _on_return(self, event):
-        """Select current item and close dropdown"""
         if self.dropdown_visible:
             current = self.listbox.curselection()
             if current:
@@ -1064,786 +803,699 @@ class SearchableCombobox(ttk.Frame):
         return "break"
     
     def _on_escape(self, event):
-        """Close dropdown without selecting"""
         self.hide_dropdown()
         return "break"
     
     def _on_select(self, event):
-        """Handle selection from listbox"""
         current = self.listbox.curselection()
         if current:
             self.var.set(self.listbox.get(current[0]))
             self.hide_dropdown()
     
     def _on_focus_out(self, event):
-        """Hide dropdown when focus is lost"""
-        # Delay to allow click on listbox
         self.after(200, lambda: self.hide_dropdown() if not self.listbox.focus_get() else None)
     
     def get(self):
-        """Get current value"""
         return self.var.get()
     
-    def set(self, value):
-        """Set current value"""
+    def set(self, value: str) -> None:
         self.var.set(value)
+
+    def set_silent(self, value: str) -> None:
+        """Set value without triggering the dropdown filter/popup"""
+        self._silent = True
+        self.var.set(value)
+        self._silent = False
+
+    def set_values(self, values: List[str]) -> None:
+        self.full_values = list(values)
+        self.filtered_values = self.full_values.copy()
+        self._update_listbox()
+
+# ==================== TOOLTIP ====================
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, event=None):
+        if self.tip_window:
+            return
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 2
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=self.text, background="#ffffe0", relief="solid", borderwidth=1,
+                 font=("Arial", 9)).pack()
+
+    def _hide(self, event=None):
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
+
+# ==================== MODERN UI ====================
+class ModernEditor(ttk.Frame):
+    """Modern split-panel editor with left list, middle scrollable editor, right buttons"""
     
-    def configure(self, **kwargs):
-        """Configure the entry widget"""
-        if 'values' in kwargs:
-            self.full_values = list(kwargs['values'])
-            self.filtered_values = self.full_values.copy()
-            del kwargs['values']
-        if kwargs:
-            self.entry.configure(**kwargs)
-    
-    def __setitem__(self, key, value):
-        """Allow dict-style configuration"""
-        if key == 'values':
-            self.full_values = list(value)
-            self.filtered_values = self.full_values.copy()
-    
-    def __getitem__(self, key):
-        """Allow dict-style access"""
-        if key == 'values':
-            return self.full_values
-        return None
-# ==================== GUI ====================
-class Nioh2Editor:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Nioh 2 Save Editor")
-        self.root.geometry("1200x700")
+    def __init__(self, parent, item_type: str, config: Optional[Dict] = None):
+        super().__init__(parent)
+        self.item_type = item_type  # 'weapon', 'item', 'scroll'
+        self.selected_index: Optional[int] = None
+        self.selected_item: Optional[Dict] = None
+        self.config = config if config is not None else ConfigManager.load_config()
+        self._suppress_selection_event = False
         
-        # Style
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Create responsive 3-panel layout with resizable divider"""
+        # Container for main panes + fixed action panel
+        content_frame = ttk.Frame(self)
+        content_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # RIGHT PANEL - Action Buttons (fixed, always visible, no scrollbar)
+        right_frame = ttk.Frame(content_frame, width=120)
+        right_frame.pack(side="right", fill="y", padx=(5, 0))
+        right_frame.pack_propagate(False)
+
+        # Use PanedWindow for resizable left and middle panels
+        paned = tk.PanedWindow(content_frame, orient="horizontal", sashwidth=5)
+        paned.pack(side="left", fill="both", expand=True)
+        paned.bind("<ButtonRelease-1>", self.save_panel_width)
+        
+        # LEFT PANEL - Item list
+        left_frame = ttk.Frame(paned)
+        paned.add(left_frame, minsize=LEFT_PANEL_MIN_WIDTH)
+        
+        ttk.Label(left_frame, text=f"{self.item_type.title()}s").pack(anchor="w")
+        self.filter_var = tk.StringVar()
+        self.filter_entry = ttk.Entry(left_frame, textvariable=self.filter_var)
+        self.filter_entry.pack(fill="x", pady=5)
+        self.filter_var.trace_add("write", lambda *args: self.populate_list())
+        
+        # Treeview
+        columns = self.get_list_columns()
+        self.tree = ttk.Treeview(left_frame, columns=columns, show="headings", height=30)
+        self.setup_treeview_columns(columns)
+        
+        scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # MIDDLE PANEL - Editor (scrollable)
+        self.editor_frame = ttk.Frame(paned)
+        paned.add(self.editor_frame, minsize=200)
+        self.editor_frame.grid_rowconfigure(0, weight=1)
+        self.editor_frame.grid_columnconfigure(0, weight=1)
+
+        # Plain editor container (no scrollbar)
+        self.editor_content = ttk.Frame(self.editor_frame)
+        self.editor_content.grid(row=0, column=0, sticky="nsew")
+        
+        ttk.Label(right_frame, text="Actions", font=("Arial", 10, "bold")).pack(pady=10)
+        
+        ttk.Button(right_frame, text="Save", command=self.on_save).pack(fill="x", pady=5)
+        ttk.Button(right_frame, text="Delete", command=self.on_delete).pack(fill="x", pady=5)
+        ttk.Button(right_frame, text="Reset", command=self.on_reset).pack(fill="x", pady=5)
+        
+        if self.item_type == "item":
+            ttk.Button(right_frame, text="Max All", command=self.on_max_all).pack(fill="x", pady=5)
+        
+        ttk.Button(right_frame, text="Clear", command=self.on_clear_selection).pack(fill="x", pady=5)
+        
+        # Bind tree selection
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        
+        # Store paned reference and set initial width
+        self.paned = paned
+        self.bind("<Map>", lambda _event: self.load_panel_width())
+        self.load_panel_width()
+        
+        self.populate_list()
+    
+    def save_panel_width(self, event=None):
+        """Save the panel width to configuration"""
+        if not hasattr(self, 'paned'):
+            return
+        if len(self.paned.panes()) < 2:
+            return
+        try:
+            width = max(self.paned.sash_coord(0)[0], LEFT_PANEL_MIN_WIDTH)
+            self.config["panel_widths"][self.item_type] = width
+            ConfigManager.save_config(self.config)
+        except TclError:
+            return
+    
+    def load_panel_width(self):
+        """Load and apply saved panel width"""
+        width = max(self.config.get("panel_widths", {}).get(self.item_type, LEFT_PANEL_MIN_WIDTH), LEFT_PANEL_MIN_WIDTH)
+        if not hasattr(self, 'paned'):
+            return
+
+        def _apply_sash() -> None:
+            if len(self.paned.panes()) < 2:
+                return
+            if not self.winfo_ismapped() or self.paned.winfo_width() <= 1:
+                self.after(50, _apply_sash)
+                return
+            try:
+                self.paned.sash_place(0, width, 0)
+            except TclError:
+                pass
+
+        self.after_idle(_apply_sash)
+    
+    def get_list_columns(self) -> Tuple:
+        if self.item_type == "weapon":
+            return ("slot", "id", "name", "level", "tier")
+        elif self.item_type == "item":
+            return ("slot", "id", "name", "qty")
+        else:  # scroll
+            return ("slot", "id", "name", "tier", "level")
+    
+    def setup_treeview_columns(self, columns):
+        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 40, "qty": 50}
+        for col in columns:
+            self.tree.heading(col, text=col.capitalize())
+            self.tree.column(col, width=widths.get(col, 60))
+    
+    def get_items(self) -> List[Dict]:
+        if self.item_type == "weapon":
+            return weapons
+        elif self.item_type == "item":
+            return items
+        else:
+            return scrolls
+    
+    def populate_list(self, selected_slot: Optional[int] = None):
+        self.tree.delete(*self.tree.get_children())
+        filter_text = self.filter_var.get().lower()
+        items_list = self.get_items()
+        
+        for item in items_list:
+            if item.get('item_id_1', 0) == 0:
+                continue
+            
+            iid_hex = swap_endian_hex(item['item_id_1'])
+            name, _ = JSONManager.get_item_name_type(iid_hex)
+            
+            if filter_text and filter_text not in name.lower():
+                continue
+            
+            if self.item_type == "weapon":
+                values = (item['slot'], iid_hex, name, item.get('weapon_level', 0), item.get('weapon_tier', 0))
+            elif self.item_type == "item":
+                values = (item['slot'], iid_hex, name, item.get('quantity', 0))
+            else:  # scroll
+                values = (item['slot'], iid_hex, name, item.get('tier', 0), item.get('item_level_1', 0))
+            
+            self.tree.insert("", "end", iid=item['slot'], values=values)
+
+        if selected_slot is not None:
+            self._set_tree_selection(selected_slot)
+
+    def _set_tree_selection(self, slot: int) -> None:
+        tree_iid = str(slot)
+        if not self.tree.exists(tree_iid):
+            return
+
+        self._suppress_selection_event = True
+        try:
+            self.tree.selection_set(tree_iid)
+            self.tree.focus(tree_iid)
+            self.tree.see(tree_iid)
+        finally:
+            self._suppress_selection_event = False
+
+    def refresh_selected_item(self) -> None:
+        prev_item_id = self.selected_item.get('item_id_1') if self.selected_item else None
+
+        if prev_item_id is not None:
+            items_list = self.get_items()
+            for item in items_list:
+                if item.get('item_id_1') == prev_item_id and prev_item_id != 0:
+                    self.selected_index = item['slot']
+                    self.selected_item = item
+                    self.populate_list(selected_slot=self.selected_index)
+                    self.load_editor()
+                    return
+
+        self.selected_index = None
+        self.selected_item = None
+        self.populate_list()
+        self.load_editor()
+
+    def commit_editor_changes(self, refresh_list: bool = True) -> bool:
+        if self.selected_item is None:
+            return True
+
+        try:
+            for key, entry in self.entries.items():
+                self.selected_item[key] = int(entry.get())
+
+            if hasattr(self, 'effect_combos'):
+                for i, combo in enumerate(self.effect_combos):
+                    chosen = combo.get().strip()
+                    if chosen:
+                        hex_id = chosen.split(" - ", 1)[0].strip()
+                        if hex_id:
+                            self.selected_item[f'effect_id_{i+1}'] = int(hex_id, 16)
+
+                    mag_val = self.effect_mags[i].get().strip()
+                    if mag_val:
+                        self.selected_item[f'effect_magnitude_{i+1}'] = int(mag_val)
+
+            if refresh_list and self.selected_index is not None:
+                self.populate_list(selected_slot=self.selected_index)
+
+            return True
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid value: {e}")
+            self.load_editor()
+            return False
+    
+    def on_tree_select(self, event):
+        if self._suppress_selection_event:
+            return
+
+        sel = self.tree.selection()
+        if not sel:
+            return
+        
+        idx = int(sel[0])
+        if idx == self.selected_index:
+            return
+
+        previous_index = self.selected_index
+        if previous_index is not None and not self.commit_editor_changes(refresh_list=False):
+            self._set_tree_selection(previous_index)
+            return
+
+        self.selected_index = idx
+        self.selected_item = self.get_items()[idx]
+        self.populate_list(selected_slot=idx)
+        
+        self.load_editor()
+    
+    def load_editor(self):
+        # Clear previous widgets
+        for widget in self.editor_content.winfo_children():
+            widget.destroy()
+        
+        if self.selected_item is None:
+            ttk.Label(self.editor_content, text="Select an item").pack()
+            return
+        
+        # Properties frame
+        props_frame = ttk.LabelFrame(self.editor_content, text="Properties", padding=10)
+        props_frame.pack(fill="x", padx=5, pady=5)
+        
+        self.entries = {}
+        
+        if self.item_type == "weapon":
+            self.load_weapon_editor(props_frame)
+        elif self.item_type == "item":
+            self.load_item_editor(props_frame)
+        else:
+            self.load_scroll_editor(props_frame)
+    
+    def load_weapon_editor(self, parent):
+        """Load weapon editor UI"""
+        assert self.selected_item is not None
+        props = [
+            ("item_id_1", "Item ID"),
+            ("Refashion", "Refashion"),
+            ("quantity", "Quantity"),
+            ("weapon_level", "Level"),
+            ("weapon_level_start", "Level Start"),
+            ("Higher_Level_Modifier", "Higher Level"),
+            ("fam", "Familiarity"),
+            ("weapon_tier", "Tier"),
+            ("yokai_weapon_gauge", "Yokai Gauge"),
+            ("rcmd_level", "Recommended Level"),
+            ("remodel_type", "Remodel Type"),
+            ("attempt_remaining", "Attempts Remaining"),
+        ]
+        
+        for i, (key, label) in enumerate(props):
+            ttk.Label(parent, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=3)
+            e = ttk.Entry(parent, width=25)
+            e.grid(row=i, column=1, sticky="w", padx=5, pady=3)
+            self.entries[key] = e
+            e.insert(0, self.selected_item.get(key, 0))
+        
+        # Effects
+        effects_frame = ttk.LabelFrame(self.editor_content, text="Effects", padding=10)
+        effects_frame.pack(fill="x", padx=5, pady=5)
+        
+        self.effect_combos = []
+        self.effect_mags = []
+        
+        effect_list = JSONManager.get_effect_dropdown_list()
+        
+        for i in range(7):
+            ttk.Label(effects_frame, text=f"Effect {i+1}:").grid(row=i, column=0, sticky="w", padx=5, pady=3)
+            combo = SearchableCombobox(effects_frame, width=40, values=effect_list)
+            combo.grid(row=i, column=1, sticky="w", padx=5, pady=3)
+            self.effect_combos.append(combo)
+            
+            # Match original: format as 8-char hex, take last 4 chars
+            effect_id = int(self.selected_item.get(f'effect_id_{i+1}', 0))
+            hex_id = f"{effect_id:08X}"[-4:]
+            for item in effect_list:
+                if item.startswith(hex_id):
+                    combo.set_silent(item)
+                    break
+            
+            ttk.Label(effects_frame, text="Mag:").grid(row=i, column=2, sticky="w", padx=5)
+            mag = ttk.Entry(effects_frame, width=12)
+            mag.grid(row=i, column=3, sticky="w", padx=5, pady=3)
+            mag.insert(0, self.selected_item.get(f'effect_magnitude_{i+1}', 0))
+            self.effect_mags.append(mag)
+    
+    def load_item_editor(self, parent):
+        assert self.selected_item is not None
+        props = [
+            ("item_id_1", "Item ID"),
+            ("Refashion", "Refashion"),
+            ("quantity", "Quantity"),
+        ]
+        
+        for i, (key, label) in enumerate(props):
+            ttk.Label(parent, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=3)
+            e = ttk.Entry(parent, width=25)
+            e.grid(row=i, column=1, sticky="w", padx=5, pady=3)
+            self.entries[key] = e
+            e.insert(0, self.selected_item.get(key, 0))
+    
+    def load_scroll_editor(self, parent):
+        assert self.selected_item is not None
+        props = [
+            ("item_id_1", "Item ID"),
+            ("item_id_2", "Item ID 2"),
+            ("item_id_3", "Item ID 3"),
+            ("item_level_1", "Level 1"),
+            ("item_level_2", "Level 2"),
+            ("higher_level_mod", "Higher Level Mod"),
+            ("tier", "Tier"),
+            ("is_it_locked", "Locked"),
+            ("attempts_remaining", "Attempts"),
+        ]
+        
+        for i, (key, label) in enumerate(props):
+            ttk.Label(parent, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=3)
+            e = ttk.Entry(parent, width=25)
+            e.grid(row=i, column=1, sticky="w", padx=5, pady=3)
+            self.entries[key] = e
+            e.insert(0, self.selected_item.get(key, 0))
+        
+        # Effects
+        effects_frame = ttk.LabelFrame(self.editor_content, text="Effects", padding=10)
+        effects_frame.pack(fill="x", padx=5, pady=5)
+        
+        self.effect_combos = []
+        self.effect_mags = []
+        
+        effect_list = JSONManager.get_effect_dropdown_list()
+        
+        for i in range(7):
+            ttk.Label(effects_frame, text=f"Effect {i+1}:").grid(row=i, column=0, sticky="w", padx=5, pady=3)
+            combo = SearchableCombobox(effects_frame, width=40, values=effect_list)
+            combo.grid(row=i, column=1, sticky="w", padx=5, pady=3)
+            self.effect_combos.append(combo)
+            
+            effect_id = int(self.selected_item.get(f'effect_id_{i+1}', 0))
+            hex_id = f"{effect_id:08X}"[-4:]
+            for item in effect_list:
+                if item.startswith(hex_id):
+                    combo.set_silent(item)
+                    break
+            
+            ttk.Label(effects_frame, text="Mag:").grid(row=i, column=2, sticky="w", padx=5)
+            mag = ttk.Entry(effects_frame, width=12)
+            mag.grid(row=i, column=3, sticky="w", padx=5, pady=3)
+            mag.insert(0, self.selected_item.get(f'effect_magnitude_{i+1}', 0))
+            self.effect_mags.append(mag)
+    
+    def on_save(self):
+        if self.selected_item is not None and not self.commit_editor_changes(refresh_list=True):
+            return
+
+        FileManager.save_file()
+    
+    def on_delete(self):
+        if self.selected_item is None:
+            return
+        
+        if messagebox.askyesno("Confirm", f"Delete {self.item_type}?"):
+            self.selected_item['item_id_1'] = 0
+            if self.item_type == "item":
+                self.selected_item['quantity'] = 0
+            self.selected_index = None
+            self.selected_item = None
+            self.populate_list()
+            self.load_editor()
+    
+    def on_reset(self):
+        if self.selected_index is not None:
+            self.load_editor()
+    
+    def on_clear_selection(self):
+        self.tree.selection_remove(self.tree.selection())
+        self.selected_index = None
+        self.selected_item = None
+        self.load_editor()
+    
+    def on_max_all(self):
+        if self.item_type != "item":
+            return
+        
+        if messagebox.askyesno("Confirm", "Set all items to 9999?"):
+            count = 0
+            for item in items:
+                if item['item_id_1'] != 0:
+                    item['quantity'] = 9999
+                    count += 1
+            self.populate_list()
+            messagebox.showinfo("Success", f"Maxed {count} items!")
+
+# ==================== MAIN APPLICATION ====================
+class Nioh2EditorModern:
+    def __init__(self, root):
+        global APP_INSTANCE
+        self.root = root
+        self.config = ConfigManager.load_config()
+        APP_INSTANCE = self
+        self.root.title("Nioh 2 Save Editor - Modernized")
+        self.root.geometry(self.config.get("window_geometry", "1400x800"))
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.status_clear_after_id = None
+        
+        # Setup style
         style = ttk.Style()
         style.theme_use('clam')
-        
-        # Menu
-        menubar = tk.Menu(root)
-        root.config(menu=menubar)
-        
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Open Save File", command=self.load_file)
-        file_menu.add_command(label="Save File", command=save_file)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=root.quit)
 
-        import_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Import(PC/PS4)", menu=import_menu)
-        import_menu.add_command(label="Import Save", command=import_save)
+        self.open_icon = self.create_open_icon()
+        self.save_icon = self.create_save_icon()
         
-        # Notebook
+        # Toolbar
+        self.setup_toolbar()
+        
+        # Main notebook
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
         
         # Create tabs
-        self.create_weapons_tab()
-        self.create_weapon_editor_tab()
-        self.create_items_tab()
-        self.create_item_editor_tab()
-        self.create_scrolls_tab()
-        self.create_scroll_editor_tab()
-        self.create_stats_tab()
-        
-        self.file_loaded = False
-    
-    def load_file(self):
-        if open_file():
-            player_weapons()
-            player_items()
-            player_scroll()
-            self.populate_weapons()
-            self.populate_items()
-            self.populate_scrolls()
-            self.update_stats_display()
-            self.file_loaded = True
-            messagebox.showinfo("Success", f"Loaded {MODE} save file\n{len([w for w in weapons if w['item_id_1'] != 0])} weapons\n{len([i for i in items if i['item_id_1'] != 0])} items\n{len([s for s in scrolls if s['item_id_1'] != 0])} scrolls")
-    
-    
-    # ==================== WEAPONS TAB ====================
-    def create_weapons_tab(self):
-        self.tab_weapons = ttk.Frame(self.notebook)
+        self.tab_weapons = ModernEditor(self.notebook, "weapon", self.config)
         self.notebook.add(self.tab_weapons, text="Weapons")
         
-        # Filter
-        filter_frame = ttk.Frame(self.tab_weapons)
-        filter_frame.pack(fill="x", padx=5, pady=5)
-        
-        ttk.Label(filter_frame, text="Filter:").pack(side="left", padx=5)
-        self.weapon_filter_var = tk.StringVar()
-        filter_entry = ttk.Entry(filter_frame, textvariable=self.weapon_filter_var, width=30)
-        filter_entry.pack(side="left", padx=5)
-        filter_entry.bind('<KeyRelease>', lambda e: self.populate_weapons())
-        
-        ttk.Button(filter_frame, text="Clear", command=lambda: [self.weapon_filter_var.set(''), self.populate_weapons()]).pack(side="left", padx=5)
-        
-        # Tree
-        columns = ("slot", "weapon_id", "name", "type", "level", "tier", "fam")
-        self.weapon_tree = ttk.Treeview(self.tab_weapons, columns=columns, show="headings", height=25)
-        
-        vsb = ttk.Scrollbar(self.tab_weapons, orient="vertical", command=self.weapon_tree.yview)
-        self.weapon_tree.configure(yscrollcommand=vsb.set)
-        
-        self.weapon_tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        
-        for col in columns:
-            self.weapon_tree.heading(col, text=col.capitalize())
-        
-        self.weapon_tree.column("slot", width=50)
-        self.weapon_tree.column("weapon_id", width=80)
-        self.weapon_tree.column("name", width=250)
-        self.weapon_tree.column("type", width=120)
-        self.weapon_tree.column("level", width=60)
-        self.weapon_tree.column("tier", width=50)
-        self.weapon_tree.column("fam", width=80)
-        
-        # Buttons
-        btn_frame = ttk.Frame(self.tab_weapons)
-        btn_frame.pack(fill="x", padx=5, pady=5)
-        
-        ttk.Button(btn_frame, text="Modify Selected", command=self.modify_weapon).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Delete Weapon", command=self.delete_weapon).pack(side="left", padx=5)
-    
-    def populate_weapons(self):
-        self.weapon_tree.delete(*self.weapon_tree.get_children())
-        filter_text = self.weapon_filter_var.get().lower()
-        
-        for weapon in weapons:
-            if weapon['item_id_1'] == 0:
-                continue
-            
-            wid = weapon['item_id_1']
-            weapon_id_hex = swap_endian_hex(wid)
-            
-            if weapon_id_hex in items_json:
-                name = items_json[weapon_id_hex]["name"]
-                type_ = items_json[weapon_id_hex]["type"]
-            else:
-                name, type_ = "Unknown", "?"
-            
-            if filter_text and filter_text not in name.lower() and filter_text not in type_.lower():
-                continue
-            
-            self.weapon_tree.insert("", "end", iid=weapon['slot'], values=(
-                weapon['slot'],
-                weapon_id_hex,
-                name,
-                type_,
-                weapon['weapon_level'],
-                weapon['weapon_tier'],
-                weapon['fam']
-            ))
-    
-    def modify_weapon(self):
-        global selected_weapon, selected_weapon_index
-        sel = self.weapon_tree.selection()
-        if not sel:
-            messagebox.showwarning("No Selection", "Select a weapon first.")
-            return
-        
-        idx = int(sel[0])
-        selected_weapon_index = idx
-        selected_weapon = weapons[idx]
-        
-        self.load_weapon_editor()
-        self.notebook.select(self.tab_weapon_editor)
-    
-    def delete_weapon(self):
-        sel = self.weapon_tree.selection()
-        if not sel:
-            return
-        
-        idx = int(sel[0])
-        if messagebox.askyesno("Confirm", "Delete this weapon?"):
-            weapons[idx]['item_id_1'] = 0
-            self.populate_weapons()
-    
-    # ==================== WEAPON EDITOR TAB ====================
-    def create_weapon_editor_tab(self):
-        self.tab_weapon_editor = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_weapon_editor, text="Weapon Editor")
-        
-        canvas = tk.Canvas(self.tab_weapon_editor)
-        scrollbar = ttk.Scrollbar(self.tab_weapon_editor, orient="vertical", command=canvas.yview)
-        editor_frame = ttk.Frame(canvas)
-        
-        editor_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=editor_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Properties
-        self.weapon_entries = {}
-        props_frame = ttk.LabelFrame(editor_frame, text="Weapon Properties", padding=10)
-        props_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        
-        props = [
-    ("item_id_1", "Item ID"),
-    ("Refashion", "Refashion"),
-    ("quantity", "Quantity"),
-    ("weapon_level", "Level"),
-    ("weapon_level_start", "Level Start"),
-    ("Higher_Level_Modifier", "Higher Level Modifier"),
-    ("fam", "Familiarity"),
-    ("left_right_1", "Left/Right 1"),
-    ("left_right_2", "Left/Right 2"),
-    ("left_right_3", "Left/Right 3"),
-    ("left_right_4", "Left/Right 4"),
-    ("weapon_tier", "Tier"),
-    ("left_right_5", "Left/Right 5"),
-    ("left_right_6", "Left/Right 6"),
-    ("left_right_7", "Left/Right 7"),
-    ("yokai_weapon_gauge", "Yokai Weapon Gauge"),
-    ("rcmd_level", "Recommended Level"),
-    ("empty_1", "Empty 1"),
-    ("remodel_type", "Remodel Type"),
-    ("attempt_remaining", "Attempts Remaining"),
-    ("extra_1", "Extra 1"),
-    ("effect_footer_part1_1", "Effect Footer Part1 1"),
-    ("effect_footer_part2_1", "Effect Footer Part2 1"),
-
-    ("effect_footer_part1_2", "Effect Footer Part1 2"),
-    ("effect_footer_part2_2", "Effect Footer Part2 2"),
-
-    ("effect_footer_part1_3", "Effect Footer Part1 3"),
-    ("effect_footer_part2_3", "Effect Footer Part2 3"),
-
-    ("effect_footer_part1_4", "Effect Footer Part1 4"),
-    ("effect_footer_part2_4", "Effect Footer Part2 4"),
-
-    ("effect_footer_part1_5", "Effect Footer Part1 5"),
-    ("effect_footer_part2_5", "Effect Footer Part2 5"),
-
-    ("effect_footer_part1_6", "Effect Footer Part1 6"),
-    ("effect_footer_part2_6", "Effect Footer Part2 6"),
-
-    ("effect_footer_part1_7", "Effect Footer Part1 7"),
-    ("effect_footer_part2_7", "Effect Footer Part2 7"),
-    ("empty_2", "Empty 2"),
-    ("is_equiped", "Is Equipped"),
-    ("empty_3", "Empty 3"),
-    ("offset", "Offset")
-]
-        
-        for i, (key, label) in enumerate(props):
-            ttk.Label(props_frame, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=3)
-            e = ttk.Entry(props_frame, width=20)
-            e.grid(row=i, column=1, sticky="w", padx=5, pady=3)
-            self.weapon_entries[key] = e
-        
-        # Effects
-        effects_frame = ttk.LabelFrame(editor_frame, text="Effects", padding=10)
-        effects_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        
-        self.weapon_effect_combos = []
-        self.weapon_effect_mags = []
-        
-        for i in range(7):
-            ttk.Label(effects_frame, text=f"Effect {i+1}:").grid(row=i, column=0, sticky="w", padx=5, pady=3)
-            combo = SearchableCombobox(
-                effects_frame,
-                width=40,
-                values=effect_dropdown_list
-            )
-            combo.grid(row=i, column=1, sticky="w", padx=5, pady=3)
-            self.weapon_effect_combos.append(combo)
-            
-            ttk.Label(effects_frame, text="Mag:").grid(row=i, column=2, sticky="w", padx=5, pady=3)
-            mag = ttk.Entry(effects_frame, width=10)
-            mag.grid(row=i, column=3, sticky="w", padx=5, pady=3)
-            self.weapon_effect_mags.append(mag)
-        
-        # Buttons
-        btn_frame = ttk.Frame(editor_frame)
-        btn_frame.grid(row=1, column=0, columnspan=2, pady=10)
-        
-        ttk.Button(btn_frame, text="Apply Changes", command=self.apply_weapon_changes).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Back", command=lambda: self.notebook.select(self.tab_weapons)).pack(side="left", padx=5)
-    
-    def load_weapon_editor(self):
-        w = selected_weapon
-        for key, entry in self.weapon_entries.items():
-            entry.delete(0, tk.END)
-            entry.insert(0, w[key])
-        
-        for i in range(7):
-            hex_id = f"{w[f'effect_id_{i+1}']:08X}"[-4:]
-            for item in effect_dropdown_list:
-                if item.startswith(hex_id):
-                    self.weapon_effect_combos[i].set(item)
-                    break
-            
-            self.weapon_effect_mags[i].delete(0, tk.END)
-            self.weapon_effect_mags[i].insert(0, w[f'effect_magnitude_{i+1}'])
-    
-    def apply_weapon_changes(self):
-        w = weapons[selected_weapon_index]
-        for key, entry in self.weapon_entries.items():
-            try:
-                w[key] = int(entry.get())
-            except ValueError:
-                messagebox.showerror("Error", f"Invalid value for {key}")
-                return
-        
-        for i in range(7):
-            chosen = self.weapon_effect_combos[i].get()
-            if chosen:
-                hex_id = chosen.split(" ")[0]
-                w[f'effect_id_{i+1}'] = int(hex_id, 16)
-            
-            mag_val = self.weapon_effect_mags[i].get()
-            if mag_val:
-                w[f'effect_magnitude_{i+1}'] = int(mag_val)
-        
-        self.populate_weapons()
-        messagebox.showinfo("Success", "Weapon updated!")
-    
-    # ==================== ITEMS TAB ====================
-    def create_items_tab(self):
-        self.tab_items = ttk.Frame(self.notebook)
+        self.tab_items = ModernEditor(self.notebook, "item", self.config)
         self.notebook.add(self.tab_items, text="Items")
         
-        # Filter
-        filter_frame = ttk.Frame(self.tab_items)
-        filter_frame.pack(fill="x", padx=5, pady=5)
-        
-        ttk.Label(filter_frame, text="Filter:").pack(side="left", padx=5)
-        self.item_filter_var = tk.StringVar()
-        filter_entry = ttk.Entry(filter_frame, textvariable=self.item_filter_var, width=30)
-        filter_entry.pack(side="left", padx=5)
-        filter_entry.bind('<KeyRelease>', lambda e: self.populate_items())
-        
-        ttk.Button(filter_frame, text="Clear", command=lambda: [self.item_filter_var.set(''), self.populate_items()]).pack(side="left", padx=5)
-        
-        # Tree
-        columns = ("slot", "item_id", "name", "type", "quantity")
-        self.item_tree = ttk.Treeview(self.tab_items, columns=columns, show="headings", height=25)
-        
-        vsb = ttk.Scrollbar(self.tab_items, orient="vertical", command=self.item_tree.yview)
-        self.item_tree.configure(yscrollcommand=vsb.set)
-        
-        self.item_tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        
-        for col in columns:
-            self.item_tree.heading(col, text=col.capitalize())
-        
-        self.item_tree.column("slot", width=50)
-        self.item_tree.column("item_id", width=80)
-        self.item_tree.column("name", width=300)
-        self.item_tree.column("type", width=150)
-        self.item_tree.column("quantity", width=80)
-        
-        # Buttons
-        btn_frame = ttk.Frame(self.tab_items)
-        btn_frame.pack(fill="x", padx=5, pady=5)
-        
-        ttk.Button(btn_frame, text="Modify Selected", command=self.modify_item).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Delete Item", command=self.delete_item).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Max Out All Items", command=self.max_out_all_items).pack(side="left", padx=5)
-    
-    def populate_items(self):
-        self.item_tree.delete(*self.item_tree.get_children())
-        filter_text = self.item_filter_var.get().lower()
-        
-        for item in items:
-            if item['item_id_1'] == 0:
-                continue
-            
-            iid = item['item_id_1']
-            item_id_hex = swap_endian_hex(iid)
-            
-            if item_id_hex in items_json:
-                name = items_json[item_id_hex]["name"]
-                type_ = items_json[item_id_hex]["type"]
-            else:
-                name, type_ = "Unknown", "?"
-            
-            if filter_text and filter_text not in name.lower() and filter_text not in type_.lower():
-                continue
-            
-            self.item_tree.insert("", "end", iid=item['slot'], values=(
-                item['slot'],
-                item_id_hex,
-                name,
-                type_,
-                item['quantity']
-            ))
-    
-    def modify_item(self):
-        global selected_item, selected_item_index
-        sel = self.item_tree.selection()
-        if not sel:
-            messagebox.showwarning("No Selection", "Select an item first.")
-            return
-        
-        idx = int(sel[0])
-        selected_item_index = idx
-        selected_item = items[idx]
-        
-        self.load_item_editor()
-        self.notebook.select(self.tab_item_editor)
-    
-    def delete_item(self):
-        sel = self.item_tree.selection()
-        if not sel:
-            return
-        
-        idx = int(sel[0])
-        if messagebox.askyesno("Confirm", "Delete this item?"):
-            items[idx]['item_id_1'] = 0
-            items[idx]['quantity'] = 0
-            self.populate_items()
-    
-    def max_out_all_items(self):
-        if messagebox.askyesno("Confirm", "Set all items quantity to 9999?"):
-            count = 0
-            for item in items:
-                if item['item_id_1'] != 0:  # Only max out existing items
-                    item['quantity'] = 9999
-                    count += 1
-            self.populate_items()
-            messagebox.showinfo("Success", f"Maxed out {count} items to 9999!")
-    
-    # ==================== ITEM EDITOR TAB ====================
-    def create_item_editor_tab(self):
-        self.tab_item_editor = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_item_editor, text="Item Editor")
-        
-        editor_frame = ttk.Frame(self.tab_item_editor)
-        editor_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Properties
-        self.item_entries = {}
-        props_frame = ttk.LabelFrame(editor_frame, text="Item Properties", padding=10)
-        props_frame.pack(fill="x", padx=5, pady=5)
-        
-        props = [
-            ("item_id_1", "Item ID"),
-            ("Refashion", "Refashion"),
-            ("quantity", "Quantity")
-        ]
-        
-        for i, (key, label) in enumerate(props):
-            ttk.Label(props_frame, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=5)
-            e = ttk.Entry(props_frame, width=30)
-            e.grid(row=i, column=1, sticky="w", padx=5, pady=5)
-            self.item_entries[key] = e
-        
-        # Buttons
-        btn_frame = ttk.Frame(editor_frame)
-        btn_frame.pack(pady=10)
-        
-        ttk.Button(btn_frame, text="Apply Changes", command=self.apply_item_changes).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Back", command=lambda: self.notebook.select(self.tab_items)).pack(side="left", padx=5)
-    
-    def load_item_editor(self):
-        item = selected_item
-        for key, entry in self.item_entries.items():
-            entry.delete(0, tk.END)
-            entry.insert(0, item[key])
-    
-    def apply_item_changes(self):
-        item = items[selected_item_index]
-        for key, entry in self.item_entries.items():
-            try:
-                item[key] = int(entry.get())
-            except ValueError:
-                messagebox.showerror("Error", f"Invalid value for {key}")
-                return
-        
-        self.populate_items()
-        messagebox.showinfo("Success", "Item updated!")
-    
-    # ==================== SCROLLS TAB ====================
-    def create_scrolls_tab(self):
-        self.tab_scrolls = ttk.Frame(self.notebook)
+        self.tab_scrolls = ModernEditor(self.notebook, "scroll", self.config)
         self.notebook.add(self.tab_scrolls, text="Scrolls")
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
         
-        # Filter
-        filter_frame = ttk.Frame(self.tab_scrolls)
-        filter_frame.pack(fill="x", padx=5, pady=5)
-        
-        ttk.Label(filter_frame, text="Filter:").pack(side="left", padx=5)
-        self.scroll_filter_var = tk.StringVar()
-        filter_entry = ttk.Entry(filter_frame, textvariable=self.scroll_filter_var, width=30)
-        filter_entry.pack(side="left", padx=5)
-        filter_entry.bind('<KeyRelease>', lambda e: self.populate_scrolls())
-        
-        ttk.Button(filter_frame, text="Clear", command=lambda: [self.scroll_filter_var.set(''), self.populate_scrolls()]).pack(side="left", padx=5)
-        
-        # Tree
-        columns = ("slot", "scroll_id", "name", "type", "tier", "level")
-        self.scroll_tree = ttk.Treeview(self.tab_scrolls, columns=columns, show="headings", height=25)
-        
-        vsb = ttk.Scrollbar(self.tab_scrolls, orient="vertical", command=self.scroll_tree.yview)
-        self.scroll_tree.configure(yscrollcommand=vsb.set)
-        
-        self.scroll_tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        
-        for col in columns:
-            self.scroll_tree.heading(col, text=col.capitalize())
-        
-        self.scroll_tree.column("slot", width=50)
-        self.scroll_tree.column("scroll_id", width=80)
-        self.scroll_tree.column("name", width=250)
-        self.scroll_tree.column("type", width=150)
-        self.scroll_tree.column("tier", width=50)
-        self.scroll_tree.column("level", width=60)
-        
-        # Buttons
-        btn_frame = ttk.Frame(self.tab_scrolls)
-        btn_frame.pack(fill="x", padx=5, pady=5)
-        
-        ttk.Button(btn_frame, text="Modify Selected", command=self.modify_scroll).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Delete Scroll", command=self.delete_scroll).pack(side="left", padx=5)
-    
-    def populate_scrolls(self):
-        self.scroll_tree.delete(*self.scroll_tree.get_children())
-        filter_text = self.scroll_filter_var.get().lower()
-        
-        for scroll in scrolls:
-            if scroll['item_id_1'] == 0:
-                continue
-            
-            sid = scroll['item_id_1']
-            scroll_id_hex = swap_endian_hex(sid)
-            
-            if scroll_id_hex in items_json:
-                name = items_json[scroll_id_hex]["name"]
-                type_ = items_json[scroll_id_hex]["type"]
-            else:
-                name, type_ = "Unknown", "?"
-            
-            if filter_text and filter_text not in name.lower() and filter_text not in type_.lower():
-                continue
-            
-            self.scroll_tree.insert("", "end", iid=scroll['slot'], values=(
-                scroll['slot'],
-                scroll_id_hex,
-                name,
-                type_,
-                scroll['tier'],
-                scroll['item_level_1']
-            ))
-    
-    def modify_scroll(self):
-        global selected_scroll, selected_scroll_index
-        sel = self.scroll_tree.selection()
-        if not sel:
-            messagebox.showwarning("No Selection", "Select a scroll first.")
-            return
-        
-        idx = int(sel[0])
-        selected_scroll_index = idx
-        selected_scroll = scrolls[idx]
-        
-        self.load_scroll_editor()
-        self.notebook.select(self.tab_scroll_editor)
-    
-    def delete_scroll(self):
-        sel = self.scroll_tree.selection()
-        if not sel:
-            return
-        
-        idx = int(sel[0])
-        if messagebox.askyesno("Confirm", "Delete this scroll?"):
-            scrolls[idx]['item_id_1'] = 0
-            self.populate_scrolls()
-    
-    # ==================== SCROLL EDITOR TAB ====================
-    def create_scroll_editor_tab(self):
-        self.tab_scroll_editor = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_scroll_editor, text="Scroll Editor")
-        
-        canvas = tk.Canvas(self.tab_scroll_editor)
-        scrollbar = ttk.Scrollbar(self.tab_scroll_editor, orient="vertical", command=canvas.yview)
-        editor_frame = ttk.Frame(canvas)
-        
-        editor_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=editor_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Properties
-        self.scroll_entries = {}
-        props_frame = ttk.LabelFrame(editor_frame, text="Scroll Properties", padding=10)
-        props_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        
-        props = [
-    ("item_id_1", "Item ID"),
-    ("item_id_2", "Item ID 2"),
-    ("item_id_3", "Item ID 3"),
-    ("item_level_1", "Level 1"),
-    ("item_level_2", "Level 2"),
-    ("higher_level_mod", "Higher Level Modifier"),
-    ("unk_1", "Unknown 1"),
-    ("extra_1", "Extra 1"),
-    ("is_it_locked", "Is Locked"),
-    ("extra_2", "Extra 2"),
-    ("tier", "Tier"),
-    ("unk_2", "Unknown 2"),
-    ("unk_3", "Unknown 3"),
-    ("attempts_remaining", "Attempts Remaining"),
-    ("unk_4", "Unknown 4"),
-    ("effect_footer_part1_1", "Effect Footer Part1 1"),
-    ("effect_footer_part2_1", "Effect Footer Part2 1"),
-    ("effect_footer_part1_2", "Effect Footer Part1 2"),
-    ("effect_footer_part2_2", "Effect Footer Part2 2"),
-    ("effect_footer_part1_3", "Effect Footer Part1 3"),
-    ("effect_footer_part2_3", "Effect Footer Part2 3"),
-    ("effect_footer_part1_4", "Effect Footer Part1 4"),
-    ("effect_footer_part2_4", "Effect Footer Part2 4"),
-    ("effect_footer_part1_5", "Effect Footer Part1 5"),
-    ("effect_footer_part2_5", "Effect Footer Part2 5"),
-    ("effect_footer_part1_6", "Effect Footer Part1 6"),
-    ("effect_footer_part2_6", "Effect Footer Part2 6"),
-    ("effect_footer_part1_7", "Effect Footer Part1 7"),
-    ("effect_footer_part2_7", "Effect Footer Part2 7"),
-    ("extra_3", "Extra 3"),
-    ("offset", "Offset")
-]
-        
-        for i, (key, label) in enumerate(props):
-            ttk.Label(props_frame, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=3)
-            e = ttk.Entry(props_frame, width=20)
-            e.grid(row=i, column=1, sticky="w", padx=5, pady=3)
-            self.scroll_entries[key] = e
-        
-        # Effects
-        effects_frame = ttk.LabelFrame(editor_frame, text="Effects", padding=10)
-        effects_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        
-        self.scroll_effect_combos = []
-        self.scroll_effect_mags = []
-        
-        for i in range(7):
-            ttk.Label(effects_frame, text=f"Effect {i+1}:").grid(row=i, column=0, sticky="w", padx=5, pady=3)
-            combo = SearchableCombobox(
-            effects_frame,
-            width=40,
-            values=effect_dropdown_list
+        self.tab_stats = self.create_stats_tab()
+        self.notebook.add(self.tab_stats, text="Stats")
+
+        self.status_label = tk.Label(
+            self.root,
+            text="",
+            bg="#1f2329",
+            fg="#f5f7fa",
+            padx=12,
+            pady=8,
+            bd=1,
+            relief="solid"
         )
-            combo.grid(row=i, column=1, sticky="w", padx=5, pady=3)
-            self.scroll_effect_combos.append(combo)
-            
-            ttk.Label(effects_frame, text="Mag:").grid(row=i, column=2, sticky="w", padx=5, pady=3)
-            mag = ttk.Entry(effects_frame, width=10)
-            mag.grid(row=i, column=3, sticky="w", padx=5, pady=3)
-            self.scroll_effect_mags.append(mag)
+        self.status_label.place_forget()
         
-        # Buttons
-        btn_frame = ttk.Frame(editor_frame)
-        btn_frame.grid(row=1, column=0, columnspan=2, pady=10)
-        
-        ttk.Button(btn_frame, text="Apply Changes", command=self.apply_scroll_changes).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Back", command=lambda: self.notebook.select(self.tab_scrolls)).pack(side="left", padx=5)
+        self.file_loaded = False
+        if AUTO_LOAD_LAST_SAVE:
+            self.root.after_idle(self.auto_load_last_save)
     
-    def load_scroll_editor(self):
-        s = selected_scroll
-        for key, entry in self.scroll_entries.items():
-            entry.delete(0, tk.END)
-            entry.insert(0, s[key])
-        
-        for i in range(7):
-            hex_id = f"{s[f'effect_id_{i+1}']:08X}"[-4:]
-            for item in effect_dropdown_list:
-                if item.startswith(hex_id):
-                    self.scroll_effect_combos[i].set(item)
-                    break
-            
-            self.scroll_effect_mags[i].delete(0, tk.END)
-            self.scroll_effect_mags[i].insert(0, s[f'effect_magnitude_{i+1}'])
-    
-    def apply_scroll_changes(self):
-        s = scrolls[selected_scroll_index]
-        for key, entry in self.scroll_entries.items():
-            try:
-                s[key] = int(entry.get())
-            except ValueError:
-                messagebox.showerror("Error", f"Invalid value for {key}")
-                return
-        
-        for i in range(7):
-            chosen = self.scroll_effect_combos[i].get()
-            if chosen:
-                hex_id = chosen.split(" ")[0]
-                s[f'effect_id_{i+1}'] = int(hex_id, 16)
-            
-            mag_val = self.scroll_effect_mags[i].get()
-            if mag_val:
-                s[f'effect_magnitude_{i+1}'] = int(mag_val)
-        
-        self.populate_scrolls()
-        messagebox.showinfo("Success", "Scroll updated!")
-    
-    # ==================== STATS TAB ====================
-    def create_stats_tab(self):
-        self.tab_stats = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_stats, text="Character Stats")
+    def setup_toolbar(self) -> None:
+        toolbar = ttk.Frame(self.root)
+        toolbar.pack(fill="x", padx=5, pady=(5, 0))
 
-        stats_frame = ttk.LabelFrame(self.tab_stats, text="Character Stats", padding=10)
+        open_button = ttk.Button(toolbar, image=self.open_icon, command=self.load_file)
+        open_button.pack(side="left", padx=(0, 4))
+        ToolTip(open_button, "Open Save File")
+
+        save_button = ttk.Button(toolbar, image=self.save_icon, command=FileManager.save_file)
+        save_button.pack(side="left", padx=(0, 4))
+        ToolTip(save_button, "Save")
+
+        import_button = ttk.Button(toolbar, text="Import Save", command=import_save)
+        import_button.pack(side="left", padx=(0, 4))
+
+    def create_open_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#c4901f", to=(1, 5, 15, 13))
+        icon.put("#e6bf57", to=(2, 6, 14, 12))
+        icon.put("#b67e16", to=(3, 3, 8, 6))
+        icon.put("#efcc6c", to=(4, 4, 11, 7))
+        icon.put("#d89b22", to=(2, 8, 15, 14))
+        icon.put("#f2d47b", to=(3, 9, 14, 13))
+        icon.put("#9b6610", to=(1, 5, 15, 6))
+        icon.put("#9b6610", to=(1, 12, 15, 13))
+        icon.put("#9b6610", to=(1, 5, 2, 13))
+        icon.put("#9b6610", to=(14, 8, 15, 13))
+        return icon
+
+    def create_save_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#214f9c", to=(2, 2, 14, 14))
+        icon.put("#4d86d9", to=(3, 3, 13, 13))
+        icon.put("#17396f", to=(10, 2, 13, 6))
+        icon.put("#dfe8f7", to=(4, 4, 10, 7))
+        icon.put("#ffffff", to=(5, 5, 9, 6))
+        icon.put("#d8d8d8", to=(4, 9, 12, 12))
+        icon.put("#f4f4f4", to=(5, 10, 11, 11))
+        icon.put("#17396f", to=(2, 2, 14, 3))
+        icon.put("#17396f", to=(2, 13, 14, 14))
+        icon.put("#17396f", to=(2, 2, 3, 14))
+        icon.put("#17396f", to=(13, 2, 14, 14))
+        return icon
+    
+    def load_file(self, file_path: Optional[str] = None):
+        if FileManager.open_file(file_path):
+            InventoryManager.load_weapons()
+            InventoryManager.load_items()
+            InventoryManager.load_scrolls()
+            
+            self.tab_weapons.refresh_selected_item()
+            self.tab_items.refresh_selected_item()
+            self.tab_scrolls.refresh_selected_item()
+            
+            self.update_stats_display()
+            self.file_loaded = True
+
+            opened_path = FileManager.last_opened_file_path
+            if opened_path is not None:
+                self.config["last_save_path"] = str(opened_path)
+                ConfigManager.save_config(self.config)
+
+            if SHOW_LOAD_SUCCESS_POPUP:
+                messagebox.showinfo("Success", 
+                    f"Loaded {MODE} save\n"
+                    f"{len([w for w in weapons if w['item_id_1'] != 0])} weapons\n"
+                    f"{len([i for i in items if i['item_id_1'] != 0])} items\n"
+                    f"{len([s for s in scrolls if s['item_id_1'] != 0])} scrolls")
+
+    def auto_load_last_save(self) -> None:
+        last_save_path = self.config.get("last_save_path", "")
+        if not last_save_path:
+            return
+        save_path = Path(last_save_path)
+        if not save_path.exists():
+            return
+        self.load_file(str(save_path))
+
+    def on_tab_changed(self, _event=None) -> None:
+        current_tab = self.notebook.select()
+        current_widget = self.notebook.nametowidget(current_tab)
+        if hasattr(current_widget, 'load_panel_width'):
+            current_widget.load_panel_width()
+
+    def commit_active_editor_changes(self) -> bool:
+        current_tab = self.notebook.select()
+        if not current_tab:
+            return True
+
+        current_widget = self.notebook.nametowidget(current_tab)
+        if isinstance(current_widget, ModernEditor):
+            return current_widget.commit_editor_changes(refresh_list=True)
+
+        return True
+
+    def show_status_message(self, message: str) -> None:
+        self.status_label.config(text=message)
+        self.status_label.lift()
+        self.status_label.place(relx=1.0, rely=1.0, x=-12, y=-12, anchor="se")
+
+        if self.status_clear_after_id is not None:
+            self.root.after_cancel(self.status_clear_after_id)
+
+        self.status_clear_after_id = self.root.after(5000, self.clear_status_message)
+
+    def clear_status_message(self) -> None:
+        self.status_label.place_forget()
+        self.status_clear_after_id = None
+
+    def persist_window_state(self) -> None:
+        self.config["window_geometry"] = self.root.geometry()
+
+        current_tab = self.notebook.select()
+        if current_tab:
+            current_widget = self.notebook.nametowidget(current_tab)
+            if hasattr(current_widget, 'save_panel_width'):
+                current_widget.save_panel_width()
+
+        ConfigManager.save_config(self.config)
+
+    def on_close(self) -> None:
+        self.persist_window_state()
+        self.root.destroy()
+    
+    def create_stats_tab(self) -> ttk.Frame:
+        frame = ttk.Frame(self.notebook)
+        
+        stats_frame = ttk.LabelFrame(frame, text="Character Stats", padding=10)
         stats_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
+        
         self.stat_entries = {}
-
-        stats = [
-            ("Amrita", AMRITA_OFFSET, 8),
-            ("Gold", GOLD_OFFSET, 8),
-            ("Level", PLAYER_LEVEL, 2),
-            ("Constitution", CONSTITUTION, 2),
-            ("Heart", HEART, 2),
-            ("Courage", COURAGE, 2),
-            ("Stamina", STAMINA, 2),
-            ("Strength", STRENGTH, 2),
-            ("Skill", SKILL, 2),
-            ("Dexterity", DEXTERITY, 2),
-            ("Magic", MAGIC, 2),
-            ("Ninjutsu", NINJITSU, 4),
-            ("Onmyo", ONMYO, 4),
-            ("Sword", SWORD, 4),
-            ("Dual Sword", DUAL_SWORD, 4),
-            ("Axe", AXE, 4),
-            ("Kusarigama", KUSARIGAMA, 4),
-            ("Odachi", ODACHI, 4),
-            ("Tonfa", TONFA, 4),
-            ("Hatchet", HATCHET, 4),
-        ]
-
-        # Split into 2 columns
+        stats = get_stat_definitions()
+        
         half = (len(stats) + 1) // 2
-        left_col = stats[:half]
-        right_col = stats[half:]
-
-        # LEFT column
-        for i, (name, offset, size) in enumerate(left_col):
+        
+        # Left column
+        for i, (name, offset, size) in enumerate(stats[:half]):
             ttk.Label(stats_frame, text=name).grid(row=i, column=0, sticky="w", padx=10, pady=5)
             e = ttk.Entry(stats_frame, width=20)
             e.grid(row=i, column=1, sticky="w", padx=10, pady=5)
             self.stat_entries[name] = (e, offset, size)
-
-        # RIGHT column
-        for i, (name, offset, size) in enumerate(right_col):
+        
+        # Right column
+        for i, (name, offset, size) in enumerate(stats[half:]):
             ttk.Label(stats_frame, text=name).grid(row=i, column=2, sticky="w", padx=20, pady=5)
             e = ttk.Entry(stats_frame, width=20)
             e.grid(row=i, column=3, sticky="w", padx=10, pady=5)
             self.stat_entries[name] = (e, offset, size)
-
-        # Buttons at the bottom
-        button_frame = ttk.Frame(self.tab_stats)
-        button_frame.pack(pady=10)
-
-        ttk.Button(button_frame, text="Load Stats", command=self.update_stats_display).pack(side="left", padx=20)
-        ttk.Button(button_frame, text="Save Stats", command=self.save_stats).pack(side="left", padx=20)
-
+        
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Load Stats", command=self.update_stats_display).pack(side="left", padx=20)
+        ttk.Button(btn_frame, text="Save Stats", command=self.save_stats).pack(side="left", padx=20)
+        
+        return frame
     
     def update_stats_display(self):
         if data is None:
@@ -1856,21 +1508,19 @@ class Nioh2Editor:
     
     def save_stats(self):
         if data is None:
-            messagebox.showwarning("Warning", "No save file loaded")
+            messagebox.showwarning("Warning", "No file loaded")
             return
         
-        for name, (entry, offset, size) in self.stat_entries.items():
-            try:
+        try:
+            for name, (entry, offset, size) in self.stat_entries.items():
                 value = int(entry.get())
                 data[offset:offset+size] = write_le(value, size)
-            except ValueError:
-                messagebox.showerror("Error", f"Invalid value for {name}")
-                return
-        
-        messagebox.showinfo("Success", "Stats updated in memory!")
+            messagebox.showinfo("Success", "Stats updated!")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid value entered")
 
-# ==================== MAIN ====================
+# ==================== ENTRY POINT ====================
 if __name__ == "__main__":
     root = tk.Tk()
-    app = Nioh2Editor(root)
+    app = Nioh2EditorModern(root)
     root.mainloop()
