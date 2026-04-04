@@ -5,8 +5,8 @@ from pathlib import Path
 import shutil
 import json
 import sys
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
 
 # ==================== CONSTANTS ====================
@@ -35,6 +35,16 @@ class Offsets(Enum):
     WEAPON_START = 0xED508
     ITEM_START = 0x105EC8
     SCROLL_START = 0x294080
+    # Integrity check offsets
+    INTEGRITY_CHECK_1 = 0x7B882 + 0x158
+    INTEGRITY_CHECK_2 = 0x7B884 + 0x158
+    INTEGRITY_CHECK_3 = 0x7B7E4 + 0x158
+    INTEGRITY_CHECK_4 = 0xECF4A + 0x158
+    # PS4 padding
+    PS4_PADDING = 0x148
+    # Import offsets
+    CHARACTER_DATA_START = 0x178
+    EXPECTED_FILE_SIZE = 0x296F28
 
 class InventorySize(Enum):
     """Inventory size constants"""
@@ -47,11 +57,43 @@ class InventorySize(Enum):
 
 # ==================== DATA MODELS ====================
 @dataclass
-class GameMode:
-    """Represents PC or PS4 mode"""
-    name: str
-    exe_path: str
-    
+class SaveState:
+    """Encapsulated save state to replace global variables"""
+    data: bytearray = field(default_factory=bytearray)
+    mode: Optional[str] = None
+    decrypted_path: Path = field(default_factory=Path)
+    decrypted: bool = False
+    weapons: List[Dict] = field(default_factory=list)
+    items: List[Dict] = field(default_factory=list)
+    scrolls: List[Dict] = field(default_factory=list)
+
+@dataclass
+class ImportState:
+    """Encapsulated import state"""
+    data: bytearray = field(default_factory=bytearray)
+    mode: Optional[str] = None
+    decrypted_path: Path = field(default_factory=Path)
+    decrypted: bool = False
+
+# Global state instances (to be replaced incrementally)
+save_state = SaveState()
+import_state = ImportState()
+APP_INSTANCE = None
+
+def get_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+base_dir = get_base_dir()
+config_file = base_dir / "editor_config.json"
+AUTO_LOAD_LAST_SAVE = True
+SHOW_LOAD_SUCCESS_POPUP = False
+LEFT_PANEL_MIN_WIDTH = 400
+
+def resource_path(*parts: str) -> Path:
+    return base_dir.joinpath(*parts)
+
 def get_stat_definitions() -> List[Tuple[str, int, int]]:
     """Return stat name, offset, byte_size tuples"""
     return [
@@ -77,36 +119,106 @@ def get_stat_definitions() -> List[Tuple[str, int, int]]:
         ("Hatchet", Offsets.HATCHET.value, 4),
     ]
 
-# ==================== GLOBALS ====================
-data: bytearray = bytearray()
-import_data: bytearray = bytearray()
-MODE: Optional[str] = None
-IMPORT_MODE: Optional[str] = None
-decrypted_path: Path = Path()
-decrypted_path_import: Path = Path()
-decrypted: bool = False
-decrypted_import: bool = False
+# ==================== BINARY SCHEMA DEFINITIONS ====================
+# Define schemas for DRY parsing/writing
+WEAPON_SCHEMA = [
+    ("item_id_1", 2),
+    ("Refashion", 2),
+    ("quantity", 2),
+    ("weapon_level", 2),
+    ("weapon_level_start", 2),
+    ("Higher_Level_Modifier", 2),
+    ("fam", 4),
+    ("left_right_1", 1),
+    ("left_right_2", 1),
+    ("left_right_3", 1),
+    ("left_right_4", 1),
+    ("weapon_tier", 1),
+    ("left_right_5", 1),
+    ("left_right_6", 1),
+    ("left_right_7", 1),
+    ("yokai_weapon_gauge", 2),
+    ("rcmd_level", 2),
+    ("empty_1", 2),
+    ("remodel_type", 1),
+    ("attempt_remaining", 1),
+    ("extra_1", 16),
+]
 
-weapons: List[Dict] = []
-items: List[Dict] = []
-scrolls: List[Dict] = []
-APP_INSTANCE = None
+EFFECT_SCHEMA = [
+    ("effect_id_{}", 4),
+    ("effect_magnitude_{}", 4),
+    ("effect_footer_part1_{}", 2),
+    ("effect_footer_part2_{}", 2),
+]
 
-def get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+WEAPON_FOOTER_SCHEMA = [
+    ("empty_2", 4),
+    ("is_equiped", 1),
+    ("empty_3", 7),
+]
 
+ITEM_SCHEMA = [
+    ("item_id_1", 2),
+    ("Refashion", 2),
+    ("quantity", 2),
+]
 
-base_dir = get_base_dir()
-config_file = base_dir / "editor_config.json"
-AUTO_LOAD_LAST_SAVE = True
-SHOW_LOAD_SUCCESS_POPUP = False
-LEFT_PANEL_MIN_WIDTH = 400
+SCROLL_SCHEMA = [
+    ("item_id_1", 2),
+    ("item_id_2", 2),
+    ("item_id_3", 2),
+    ("item_level_1", 2),
+    ("item_level_2", 2),
+    ("higher_level_mod", 2),
+    ("unk_1", 4),
+    ("extra_1", 2),
+    ("is_it_locked", 1),
+    ("extra_2", 1),
+    ("tier", 1),
+    ("unk_2", 1),
+    ("unk_3", 9),
+    ("attempts_remaining", 1),
+    ("unk_4", 16),
+]
 
+SCROLL_FOOTER_SCHEMA = [
+    ("extra_3", 4),
+]
 
-def resource_path(*parts: str) -> Path:
-    return base_dir.joinpath(*parts)
+# Editor field definitions
+EDITOR_FIELDS = {
+    "weapon": [
+        ("item_id_1", "Item ID"),
+        ("Refashion", "Refashion"),
+        ("quantity", "Quantity"),
+        ("weapon_level", "Level"),
+        ("weapon_level_start", "Level Start"),
+        ("Higher_Level_Modifier", "Higher Level"),
+        ("fam", "Familiarity"),
+        ("weapon_tier", "Tier"),
+        ("yokai_weapon_gauge", "Yokai Gauge"),
+        ("rcmd_level", "Recommended Level"),
+        ("remodel_type", "Remodel Type"),
+        ("attempt_remaining", "Attempts Remaining"),
+    ],
+    "item": [
+        ("item_id_1", "Item ID"),
+        ("Refashion", "Refashion"),
+        ("quantity", "Quantity"),
+    ],
+    "scroll": [
+        ("item_id_1", "Item ID"),
+        ("item_id_2", "Item ID 2"),
+        ("item_id_3", "Item ID 3"),
+        ("item_level_1", "Level 1"),
+        ("item_level_2", "Level 2"),
+        ("higher_level_mod", "Higher Level Mod"),
+        ("tier", "Tier"),
+        ("is_it_locked", "Locked"),
+        ("attempts_remaining", "Attempts"),
+    ],
+}
 
 # ==================== CONFIG MANAGEMENT ====================
 class ConfigManager:
@@ -199,6 +311,151 @@ def swap_endian_hex(val: int) -> str:
     """Convert item_id to hex string with endian swap"""
     return f"{((val & 0xFF) << 8) | (val >> 8):04X}"
 
+# ==================== BINARY PARSING REFACTORED ====================
+class BinaryParser:
+    """Generic binary data parser using schemas"""
+    
+    @staticmethod
+    def parse_struct(data: bytearray, offset: int, schema: List[Tuple[str, int]]) -> Dict[str, int]:
+        """Parse binary data using a schema definition"""
+        result = {}
+        o = offset
+        for field_name, size in schema:
+            result[field_name] = int.from_bytes(data[o:o+size], 'little')
+            o += size
+        return result
+    
+    @staticmethod
+    def parse_effects(data: bytearray, offset: int, num_effects: int = 7) -> Tuple[Dict[str, int], int]:
+        """Parse effect fields"""
+        result = {}
+        o = offset
+        for i in range(1, num_effects + 1):
+            result[f'effect_id_{i}'] = int.from_bytes(data[o:o+4], 'little')
+            o += 4
+            result[f'effect_magnitude_{i}'] = int.from_bytes(data[o:o+4], 'little')
+            o += 4
+            result[f'effect_footer_part1_{i}'] = int.from_bytes(data[o:o+2], 'little')
+            o += 2
+            result[f'effect_footer_part2_{i}'] = int.from_bytes(data[o:o+2], 'little')
+            o += 2
+        return result, o
+    
+    @staticmethod
+    def write_struct(data: bytearray, offset: int, item: Dict[str, Any], schema: List[Tuple[str, int]]) -> int:
+        """Write binary data using a schema definition"""
+        o = offset
+        for field_name, size in schema:
+            data[o:o+size] = write_le(item[field_name], size)
+            o += size
+        return o
+    
+    @staticmethod
+    def write_effects(data: bytearray, offset: int, item: Dict[str, Any], num_effects: int = 7) -> int:
+        """Write effect fields"""
+        o = offset
+        for i in range(1, num_effects + 1):
+            data[o:o+4] = write_le(item[f'effect_id_{i}'], 4)
+            o += 4
+            data[o:o+4] = write_le(item[f'effect_magnitude_{i}'], 4)
+            o += 4
+            data[o:o+2] = write_le(item[f'effect_footer_part1_{i}'], 2)
+            o += 2
+            data[o:o+2] = write_le(item[f'effect_footer_part2_{i}'], 2)
+            o += 2
+        return o
+
+# ==================== ENCRYPTION/DECRYPTION ====================
+class SaveCrypto:
+    """Handle save file encryption/decryption operations"""
+    
+    @staticmethod
+    def decrypt_pc(file_path: str, exe_path: Path) -> bytearray:
+        """Decrypt PC save file"""
+        subprocess.run(
+            [str(exe_path), file_path],
+            cwd=exe_path.parent,
+            input="\n",
+            text=True,
+            capture_output=True
+        )
+        
+        decrypted_path = exe_path.parent / "decr_SAVEDATA.BIN"
+        with open(decrypted_path, 'rb') as f:
+            return bytearray(f.read())
+    
+    @staticmethod
+    def encrypt_pc(data: bytearray, decrypted_path: Path, exe_path: Path) -> bytes:
+        """Encrypt PC save file"""
+        with open(decrypted_path, 'wb') as f:
+            f.write(data)
+        
+        subprocess.run(
+            [str(exe_path), decrypted_path],
+            cwd=exe_path.parent,
+            input="\n",
+            text=True,
+            capture_output=True
+        )
+        
+        encrypted_path = exe_path.parent / "decr_decr_SAVEDATA.BIN"
+        with open(encrypted_path, 'rb') as f:
+            return f.read()
+    
+    @staticmethod
+    def decrypt_ps4(file_path: str, exe_path: Path) -> Tuple[bytearray, bool, Path]:
+        """Decrypt PS4 save file. Returns (data, was_decrypted, path)"""
+        dst_path = exe_path.parent / "APP.BIN"
+        shutil.copy2(file_path, dst_path)
+        
+        with open(dst_path, 'rb') as f:
+            magic_bytes = f.read(4)
+        
+        if magic_bytes != b'\x00\x00\x00\x00':
+            subprocess.run(
+                [str(exe_path), str(dst_path)],
+                cwd=exe_path.parent,
+                input="\n",
+                text=True,
+                check=True
+            )
+            decrypted_path = exe_path.parent / "APP.BIN_out.bin"
+            was_decrypted = False
+        else:
+            decrypted_path = Path(file_path)
+            was_decrypted = True
+        
+        with open(decrypted_path, 'rb') as f:
+            data = bytearray(f.read())
+        
+        return data, was_decrypted, decrypted_path
+    
+    @staticmethod
+    def encrypt_ps4(data: bytearray, decrypted_path: Path, exe_path: Path) -> bytes:
+        """Encrypt PS4 save file"""
+        with open(decrypted_path, 'wb') as f:
+            f.write(data)
+        
+        subprocess.run(
+            [str(exe_path), str(decrypted_path)],
+            cwd=exe_path.parent,
+            input="\n",
+            text=True,
+            check=True
+        )
+        
+        encrypted_path = exe_path.parent / "APP.BIN_out.bin_out.bin"
+        with open(encrypted_path, 'rb') as f:
+            return f.read()
+    
+    @staticmethod
+    def disable_integrity_checks(data: bytearray) -> None:
+        """Disable game integrity checks"""
+        data[Offsets.INTEGRITY_CHECK_1.value] = 0
+        data[Offsets.INTEGRITY_CHECK_2.value] = 0
+        data[Offsets.INTEGRITY_CHECK_3.value] = 0
+        data[Offsets.INTEGRITY_CHECK_4.value] = 0
+
 # ==================== FILE OPERATIONS ====================
 class FileManager:
     """Handle save file loading and encryption/decryption"""
@@ -214,8 +471,6 @@ class FileManager:
     
     @staticmethod
     def open_file(file_path: Optional[str] = None) -> bool:
-        global data, MODE, decrypted_path, decrypted
-
         if file_path is None:
             file_path = filedialog.askopenfilename(
                 title="Select Save File",
@@ -245,72 +500,33 @@ class FileManager:
     
     @staticmethod
     def _load_pc_save(file_path: str) -> bool:
-        global data, MODE, decrypted_path
-        MODE = 'PC'
+        save_state.mode = 'PC'
         exe_path = resource_path("PC", "pc.exe")
         
-        subprocess.run(
-            [str(exe_path), file_path],
-            cwd=exe_path.parent,
-            input="\n",
-            text=True,
-            capture_output=True
-        )
+        save_state.data = SaveCrypto.decrypt_pc(file_path, exe_path)
+        save_state.decrypted_path = exe_path.parent / "decr_SAVEDATA.BIN"
         
-        decrypted_path = exe_path.parent / "decr_SAVEDATA.BIN"
-        with open(decrypted_path, 'rb') as f:
-            data = bytearray(f.read())
-        
-        FileManager._disable_integrity_checks(data)
+        SaveCrypto.disable_integrity_checks(save_state.data)
         return True
     
     @staticmethod
     def _load_ps4_save(file_path: str) -> bool:
-        global data, MODE, decrypted_path, decrypted
-        MODE = 'PS4'
+        save_state.mode = 'PS4'
         exe_path = resource_path("ps4", "ps4.exe")
-        dst_path = exe_path.parent / "APP.BIN"
         
-        shutil.copy2(file_path, dst_path)
-        
-        with open(dst_path, 'rb') as f:
-            magic_bytes = f.read(4)
-        
-        if magic_bytes != b'\x00\x00\x00\x00':
-            subprocess.run(
-                [str(exe_path), str(dst_path)],
-                cwd=exe_path.parent,
-                input="\n",
-                text=True,
-                check=True
-            )
-            decrypted_path = exe_path.parent / "APP.BIN_out.bin"
-        else:
-            decrypted = True
-            decrypted_path = Path(file_path)
-        
-        with open(decrypted_path, 'rb') as f:
-            data = bytearray(f.read())
+        data, was_decrypted, decrypted_path = SaveCrypto.decrypt_ps4(file_path, exe_path)
+        save_state.decrypted = was_decrypted
+        save_state.decrypted_path = decrypted_path
         
         # Add padding for PS4
-        padding = b'\x00' * 0x148
-        data = bytearray(padding) + data
-        FileManager._disable_integrity_checks(data)
+        padding = b'\x00' * Offsets.PS4_PADDING.value
+        save_state.data = bytearray(padding) + data
+        SaveCrypto.disable_integrity_checks(save_state.data)
         return True
     
     @staticmethod
-    def _disable_integrity_checks(data: bytearray) -> None:
-        """Disable game integrity checks"""
-        data[0x7B882+0x158] = 0
-        data[0x7B884+0x158] = 0
-        data[0x7B7E4+0x158] = 0
-        data[0xECF4A+0x158] = 0
-    
-    @staticmethod
     def save_file() -> None:
-        global data, decrypted_path
-        
-        if not data:
+        if not save_state.data:
             messagebox.showwarning("Warning", "No file loaded")
             return
 
@@ -319,9 +535,9 @@ class FileManager:
         
         InventoryManager.write_all_to_data()
         
-        if MODE == 'PC':
+        if save_state.mode == 'PC':
             FileManager._save_pc_file()
-        elif MODE == 'PS4':
+        elif save_state.mode == 'PS4':
             FileManager._save_ps4_file()
     
     @staticmethod
@@ -330,24 +546,12 @@ class FileManager:
         if target_path is None:
             return
 
-        with open(decrypted_path, 'wb') as f:
-            f.write(data)
-        
         exe_path = base_dir / "pc" / "pc.exe"
-        subprocess.run(
-            [str(exe_path), decrypted_path],
-            cwd=exe_path.parent,
-            input="\n",
-            text=True,
-            capture_output=True
-        )
-        
-        last_path = exe_path.parent / "decr_decr_SAVEDATA.BIN"
-        with open(last_path, 'rb') as f:
-            final_data = f.read()
+        final_data = SaveCrypto.encrypt_pc(save_state.data, save_state.decrypted_path, exe_path)
 
         with open(target_path, 'wb') as f:
             f.write(final_data)
+        
         if APP_INSTANCE is not None:
             APP_INSTANCE.show_status_message(f"Saved to {target_path}")
     
@@ -357,40 +561,26 @@ class FileManager:
         if target_path is None:
             return
 
-        ps4_data = data[0x148:]
+        ps4_data = save_state.data[Offsets.PS4_PADDING.value:]
         
-        if decrypted:
+        if save_state.decrypted:
             with open(target_path, 'wb') as f:
                 f.write(ps4_data)
             if APP_INSTANCE is not None:
                 APP_INSTANCE.show_status_message(f"Saved to {target_path}")
             return
         
-        with open(decrypted_path, 'wb') as f:
-            f.write(ps4_data)
-        
         exe_path = base_dir / "ps4" / "ps4.exe"
-        subprocess.run(
-            [str(exe_path), str(decrypted_path)],
-            cwd=exe_path.parent,
-            input="\n",
-            text=True,
-            check=True
-        )
-        
-        dst_path = exe_path.parent / "APP.BIN_out.bin_out.bin"
-        with open(dst_path, 'rb') as f:
-            final_data = f.read()
+        final_data = SaveCrypto.encrypt_ps4(ps4_data, save_state.decrypted_path, exe_path)
 
         with open(target_path, 'wb') as f:
             f.write(final_data)
+        
         if APP_INSTANCE is not None:
             APP_INSTANCE.show_status_message(f"Saved to {target_path}")
     
     @staticmethod
     def open_file_import() -> bool:
-        global import_data, IMPORT_MODE, decrypted_path_import, decrypted_import
-        
         file_path = filedialog.askopenfilename(
             title="Select Save File to Import",
             filetypes=[("Save Files", "*.BIN"), ("All Files", "*.*")]
@@ -401,168 +591,88 @@ class FileManager:
         file_name = Path(file_path).name
         
         if file_name == 'SAVEDATA.BIN':
-            IMPORT_MODE = 'PC'
+            import_state.mode = 'PC'
             exe_path = resource_path("PC_import", "pc.exe")
             
-            subprocess.run(
-                [str(exe_path), file_path],
-                cwd=exe_path.parent,
-                input="\n",
-                text=True,
-                capture_output=True
-            )
+            import_state.data = SaveCrypto.decrypt_pc(file_path, exe_path)
+            import_state.decrypted_path = exe_path.parent / "decr_SAVEDATA.BIN"
             
-            decrypted_path_import = exe_path.parent / "decr_SAVEDATA.BIN"
-            with open(decrypted_path_import, 'rb') as f:
-                import_data = bytearray(f.read())
-            
-            FileManager._disable_integrity_checks(import_data)
+            SaveCrypto.disable_integrity_checks(import_state.data)
             return True
         
         elif file_name == 'APP.BIN':
-            IMPORT_MODE = 'PS4'
+            import_state.mode = 'PS4'
             exe_path = resource_path("PS4_import", "ps4.exe")
-            dst_path = exe_path.parent / "APP.BIN"
             
-            shutil.copy2(file_path, dst_path)
+            data, was_decrypted, decrypted_path = SaveCrypto.decrypt_ps4(file_path, exe_path)
+            import_state.decrypted = was_decrypted
+            import_state.decrypted_path = decrypted_path
             
-            with open(dst_path, 'rb') as f:
-                magic_bytes = f.read(4)
-            
-            if magic_bytes != b'\x00\x00\x00\x00':
-                subprocess.run(
-                    [str(exe_path), str(dst_path)],
-                    cwd=exe_path.parent,
-                    input="\n",
-                    text=True,
-                    check=True
-                )
-                decrypted_path_import = exe_path.parent / "APP.BIN_out.bin"
-            else:
-                decrypted_import = True
-                decrypted_path_import = Path(file_path)
-            
-            with open(decrypted_path_import, 'rb') as f:
-                import_data = bytearray(f.read())
-            
-            padding = b'\x00' * 0x148
-            import_data = bytearray(padding) + import_data
-            FileManager._disable_integrity_checks(import_data)
+            padding = b'\x00' * Offsets.PS4_PADDING.value
+            import_state.data = bytearray(padding) + data
+            SaveCrypto.disable_integrity_checks(import_state.data)
             return True
         else:
             messagebox.showerror("Error", "Unknown file. Use SAVEDATA.BIN (PC) or APP.BIN (PS4)")
             return False
 
-
 def import_save():
-    global data, import_data
-    
     if not FileManager.open_file_import():
         return
     
-    if not data:
+    if not save_state.data:
         messagebox.showerror("Error", "Load your current save first")
         return
     
     if messagebox.askyesno("Confirm", "Replace current character?"):
-        data = data[:0x178] + import_data[0x178:]
-        if len(data) != 0x296F28:
+        save_state.data = save_state.data[:Offsets.CHARACTER_DATA_START.value] + import_state.data[Offsets.CHARACTER_DATA_START.value:]
+        if len(save_state.data) != Offsets.EXPECTED_FILE_SIZE.value:
             messagebox.showerror('Error', 'Size mismatch')
         messagebox.showinfo("Success", "File imported. Changes apply on next game load.")
 
 # ==================== INVENTORY PARSING ====================
 class InventoryParser:
-    """Parse binary inventory data efficiently"""
+    """Parse binary inventory data efficiently using schemas"""
     
     @staticmethod
     def parse_weapon(offset: int) -> Dict:
         """Parse weapon data from binary"""
-        o = offset
-        weapon = {}
+        weapon = BinaryParser.parse_struct(save_state.data, offset, WEAPON_SCHEMA)
         
-        # Parse all fields efficiently
-        weapon['item_id_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['Refashion'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['quantity'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['weapon_level'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['weapon_level_start'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['Higher_Level_Modifier'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['fam'] = int.from_bytes(data[o:o+4], 'little'); o += 4
-
-        weapon['left_right_1'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['left_right_2'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['left_right_3'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['left_right_4'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['weapon_tier'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['left_right_5'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['left_right_6'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['left_right_7'] = int.from_bytes(data[o:o+1], 'little'); o += 1
+        # Parse effects
+        effects_offset = offset + sum(size for _, size in WEAPON_SCHEMA)
+        effects, next_offset = BinaryParser.parse_effects(save_state.data, effects_offset)
+        weapon.update(effects)
         
-        weapon['yokai_weapon_gauge'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['rcmd_level'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['empty_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        weapon['remodel_type'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['attempt_remaining'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['extra_1'] = int.from_bytes(data[o:o+16], 'little'); o += 16
+        # Parse footer
+        footer = BinaryParser.parse_struct(save_state.data, next_offset, WEAPON_FOOTER_SCHEMA)
+        weapon.update(footer)
         
-        # Effects
-        for i in range(1, 8):
-            weapon[f'effect_id_{i}'] = int.from_bytes(data[o:o+4], 'little'); o += 4
-            weapon[f'effect_magnitude_{i}'] = int.from_bytes(data[o:o+4], 'little'); o += 4
-            weapon[f'effect_footer_part1_{i}'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-            weapon[f'effect_footer_part2_{i}'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        
-        weapon['empty_2'] = int.from_bytes(data[o:o+4], 'little'); o += 4
-        weapon['is_equiped'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        weapon['empty_3'] = int.from_bytes(data[o:o+7], 'little'); o += 7
         weapon['offset'] = offset
-        
         return weapon
     
     @staticmethod
     def parse_item(offset: int) -> Dict:
         """Parse item data from binary"""
-        o = offset
-        item = {}
-        
-        item['item_id_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        item['Refashion'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        item['quantity'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        item = BinaryParser.parse_struct(save_state.data, offset, ITEM_SCHEMA)
         item['offset'] = offset
-        
         return item
     
     @staticmethod
     def parse_scroll(offset: int) -> Dict:
         """Parse scroll data from binary"""
-        o = offset
-        scroll = {}
+        scroll = BinaryParser.parse_struct(save_state.data, offset, SCROLL_SCHEMA)
         
-        scroll['item_id_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        scroll['item_id_2'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        scroll['item_id_3'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        scroll['item_level_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        scroll['item_level_2'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        scroll['higher_level_mod'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        scroll['unk_1'] = int.from_bytes(data[o:o+4], 'little'); o += 4
-        scroll['extra_1'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-        scroll['is_it_locked'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        scroll['extra_2'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        scroll['tier'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        scroll['unk_2'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        scroll['unk_3'] = int.from_bytes(data[o:o+9], 'little'); o += 9
-        scroll['attempts_remaining'] = int.from_bytes(data[o:o+1], 'little'); o += 1
-        scroll['unk_4'] = int.from_bytes(data[o:o+16], 'little'); o += 16
+        # Parse effects
+        effects_offset = offset + sum(size for _, size in SCROLL_SCHEMA)
+        effects, next_offset = BinaryParser.parse_effects(save_state.data, effects_offset)
+        scroll.update(effects)
         
-        for i in range(1, 8):
-            scroll[f'effect_id_{i}'] = int.from_bytes(data[o:o+4], 'little'); o += 4
-            scroll[f'effect_magnitude_{i}'] = int.from_bytes(data[o:o+4], 'little'); o += 4
-            scroll[f'effect_footer_part1_{i}'] = int.from_bytes(data[o:o+2], 'little'); o += 2
-            scroll[f'effect_footer_part2_{i}'] = int.from_bytes(data[o:o+2], 'little'); o += 2
+        # Parse footer
+        footer = BinaryParser.parse_struct(save_state.data, next_offset, SCROLL_FOOTER_SCHEMA)
+        scroll.update(footer)
         
-        scroll['extra_3'] = int.from_bytes(data[o:o+4], 'little'); o += 4
         scroll['offset'] = offset
-        
         return scroll
 
 class InventoryManager:
@@ -570,39 +680,36 @@ class InventoryManager:
     
     @staticmethod
     def load_weapons() -> None:
-        global weapons
-        weapons = []
+        save_state.weapons = []
         for slot in range(InventorySize.WEAPON_SLOTS.value):
             offset = Offsets.WEAPON_START.value + (slot * InventorySize.WEAPON_SIZE.value)
             weapon = InventoryParser.parse_weapon(offset)
             weapon['slot'] = slot
-            weapons.append(weapon)
+            save_state.weapons.append(weapon)
     
     @staticmethod
     def load_items() -> None:
-        global items
-        items = []
+        save_state.items = []
         for slot in range(InventorySize.ITEM_SLOTS.value):
             offset = Offsets.ITEM_START.value + (slot * InventorySize.ITEM_SIZE.value)
             item = InventoryParser.parse_item(offset)
             item['slot'] = slot
-            items.append(item)
+            save_state.items.append(item)
     
     @staticmethod
     def load_scrolls() -> None:
-        global scrolls
-        scrolls = []
+        save_state.scrolls = []
         for slot in range(InventorySize.SCROLL_SLOTS.value):
             offset = Offsets.SCROLL_START.value + (slot * InventorySize.SCROLL_SIZE.value)
-            if offset + InventorySize.SCROLL_SIZE.value > len(data):
+            if offset + InventorySize.SCROLL_SIZE.value > len(save_state.data):
                 break
             
-            if int.from_bytes(data[offset:offset+2], 'little') == 0:
+            if int.from_bytes(save_state.data[offset:offset+2], 'little') == 0:
                 continue
             
             scroll = InventoryParser.parse_scroll(offset)
             scroll['slot'] = slot
-            scrolls.append(scroll)
+            save_state.scrolls.append(scroll)
     
     @staticmethod
     def write_all_to_data() -> None:
@@ -612,83 +719,37 @@ class InventoryManager:
     
     @staticmethod
     def write_weapons_to_data() -> None:
-        for weapon in weapons:
-            slot, offset = weapon['slot'], Offsets.WEAPON_START.value + (weapon['slot'] * InventorySize.WEAPON_SIZE.value)
-            o = offset
+        for weapon in save_state.weapons:
+            offset = Offsets.WEAPON_START.value + (weapon['slot'] * InventorySize.WEAPON_SIZE.value)
             
-            data[o:o+2] = write_le(weapon['item_id_1'], 2); o += 2
-            data[o:o+2] = write_le(weapon['Refashion'], 2); o += 2
-            data[o:o+2] = write_le(weapon['quantity'], 2); o += 2
-            data[o:o+2] = write_le(weapon['weapon_level'], 2); o += 2
-            data[o:o+2] = write_le(weapon['weapon_level_start'], 2); o += 2
-            data[o:o+2] = write_le(weapon['Higher_Level_Modifier'], 2); o += 2
-            data[o:o+4] = write_le(weapon['fam'], 4); o += 4
-
-            data[o:o+1] = write_le(weapon['left_right_1'], 1); o += 1
-            data[o:o+1] = write_le(weapon['left_right_2'], 1); o += 1
-            data[o:o+1] = write_le(weapon['left_right_3'], 1); o += 1
-            data[o:o+1] = write_le(weapon['left_right_4'], 1); o += 1
-            data[o:o+1] = write_le(weapon['weapon_tier'], 1); o += 1
-            data[o:o+1] = write_le(weapon['left_right_5'], 1); o += 1
-            data[o:o+1] = write_le(weapon['left_right_6'], 1); o += 1
-            data[o:o+1] = write_le(weapon['left_right_7'], 1); o += 1
+            # Write main fields
+            o = BinaryParser.write_struct(save_state.data, offset, weapon, WEAPON_SCHEMA)
             
-            data[o:o+2] = write_le(weapon['yokai_weapon_gauge'], 2); o += 2
-            data[o:o+2] = write_le(weapon['rcmd_level'], 2); o += 2
-            data[o:o+2] = write_le(weapon['empty_1'], 2); o += 2
-            data[o:o+1] = write_le(weapon['remodel_type'], 1); o += 1
-            data[o:o+1] = write_le(weapon['attempt_remaining'], 1); o += 1
-            data[o:o+16] = write_le(weapon['extra_1'], 16); o += 16
+            # Write effects
+            o = BinaryParser.write_effects(save_state.data, o, weapon)
             
-            for i in range(1, 8):
-                data[o:o+4] = write_le(weapon[f'effect_id_{i}'], 4); o += 4
-                data[o:o+4] = write_le(weapon[f'effect_magnitude_{i}'], 4); o += 4
-                data[o:o+2] = write_le(weapon[f'effect_footer_part1_{i}'], 2); o += 2
-                data[o:o+2] = write_le(weapon[f'effect_footer_part2_{i}'], 2); o += 2
-            
-            data[o:o+4] = write_le(weapon['empty_2'], 4); o += 4
-            data[o:o+1] = write_le(weapon['is_equiped'], 1); o += 1
-            data[o:o+7] = write_le(weapon['empty_3'], 7)
+            # Write footer
+            BinaryParser.write_struct(save_state.data, o, weapon, WEAPON_FOOTER_SCHEMA)
     
     @staticmethod
     def write_items_to_data() -> None:
-        for item in items:
+        for item in save_state.items:
             offset = Offsets.ITEM_START.value + (item['slot'] * InventorySize.ITEM_SIZE.value)
-            o = offset
-            
-            data[o:o+2] = write_le(item['item_id_1'], 2); o += 2
-            data[o:o+2] = write_le(item['Refashion'], 2); o += 2
-            data[o:o+2] = write_le(item['quantity'], 2)
+            BinaryParser.write_struct(save_state.data, offset, item, ITEM_SCHEMA)
     
     @staticmethod
     def write_scrolls_to_data() -> None:
-        for scroll in scrolls:
+        for scroll in save_state.scrolls:
             offset = Offsets.SCROLL_START.value + (scroll['slot'] * InventorySize.SCROLL_SIZE.value)
-            o = offset
             
-            data[o:o+2] = write_le(scroll['item_id_1'], 2); o += 2
-            data[o:o+2] = write_le(scroll['item_id_2'], 2); o += 2
-            data[o:o+2] = write_le(scroll['item_id_3'], 2); o += 2
-            data[o:o+2] = write_le(scroll['item_level_1'], 2); o += 2
-            data[o:o+2] = write_le(scroll['item_level_2'], 2); o += 2
-            data[o:o+2] = write_le(scroll['higher_level_mod'], 2); o += 2
-            data[o:o+4] = write_le(scroll['unk_1'], 4); o += 4
-            data[o:o+2] = write_le(scroll['extra_1'], 2); o += 2
-            data[o:o+1] = write_le(scroll['is_it_locked'], 1); o += 1
-            data[o:o+1] = write_le(scroll['extra_2'], 1); o += 1
-            data[o:o+1] = write_le(scroll['tier'], 1); o += 1
-            data[o:o+1] = write_le(scroll['unk_2'], 1); o += 1
-            data[o:o+9] = write_le(scroll['unk_3'], 9); o += 9
-            data[o:o+1] = write_le(scroll['attempts_remaining'], 1); o += 1
-            data[o:o+16] = write_le(scroll['unk_4'], 16); o += 16
+            # Write main fields
+            o = BinaryParser.write_struct(save_state.data, offset, scroll, SCROLL_SCHEMA)
             
-            for i in range(1, 8):
-                data[o:o+4] = write_le(scroll[f'effect_id_{i}'], 4); o += 4
-                data[o:o+4] = write_le(scroll[f'effect_magnitude_{i}'], 4); o += 4
-                data[o:o+2] = write_le(scroll[f'effect_footer_part1_{i}'], 2); o += 2
-                data[o:o+2] = write_le(scroll[f'effect_footer_part2_{i}'], 2); o += 2
+            # Write effects
+            o = BinaryParser.write_effects(save_state.data, o, scroll)
             
-            data[o:o+4] = write_le(scroll['extra_3'], 4)
+            # Write footer
+            BinaryParser.write_struct(save_state.data, o, scroll, SCROLL_FOOTER_SCHEMA)
 
 # ==================== CUSTOM WIDGETS ====================
 class SearchableCombobox(ttk.Frame):
@@ -893,8 +954,11 @@ class ModernEditor(ttk.Frame):
         
         ttk.Label(left_frame, text=f"{self.item_type.title()}s").pack(anchor="w")
         self.filter_var = tk.StringVar()
-        self.filter_entry = ttk.Entry(left_frame, textvariable=self.filter_var)
-        self.filter_entry.pack(fill="x", pady=5)
+        filter_frame = ttk.Frame(left_frame)
+        filter_frame.pack(fill="x", pady=5)
+        self.filter_entry = ttk.Entry(filter_frame, textvariable=self.filter_var)
+        self.filter_entry.pack(side="left", fill="both", expand=True)
+        ttk.Button(filter_frame, text="✕", width=2, command=lambda: self.filter_var.set("")).pack(side="left", fill="y")
         self.filter_var.trace_add("write", lambda *args: self.populate_list())
         
         # Treeview
@@ -986,11 +1050,11 @@ class ModernEditor(ttk.Frame):
     
     def get_items(self) -> List[Dict]:
         if self.item_type == "weapon":
-            return weapons
+            return save_state.weapons
         elif self.item_type == "item":
-            return items
+            return save_state.items
         else:
-            return scrolls
+            return save_state.scrolls
     
     def populate_list(self, selected_slot: Optional[int] = None):
         self.tree.delete(*self.tree.get_children())
@@ -1103,6 +1167,7 @@ class ModernEditor(ttk.Frame):
         self.load_editor()
     
     def load_editor(self):
+        """Load editor fields based on item type using config-driven approach"""
         # Clear previous widgets
         for widget in self.editor_content.winfo_children():
             widget.destroy()
@@ -1117,39 +1182,25 @@ class ModernEditor(ttk.Frame):
         
         self.entries = {}
         
-        if self.item_type == "weapon":
-            self.load_weapon_editor(props_frame)
-        elif self.item_type == "item":
-            self.load_item_editor(props_frame)
-        else:
-            self.load_scroll_editor(props_frame)
-    
-    def load_weapon_editor(self, parent):
-        """Load weapon editor UI"""
-        assert self.selected_item is not None
-        props = [
-            ("item_id_1", "Item ID"),
-            ("Refashion", "Refashion"),
-            ("quantity", "Quantity"),
-            ("weapon_level", "Level"),
-            ("weapon_level_start", "Level Start"),
-            ("Higher_Level_Modifier", "Higher Level"),
-            ("fam", "Familiarity"),
-            ("weapon_tier", "Tier"),
-            ("yokai_weapon_gauge", "Yokai Gauge"),
-            ("rcmd_level", "Recommended Level"),
-            ("remodel_type", "Remodel Type"),
-            ("attempt_remaining", "Attempts Remaining"),
-        ]
+        # Use config-driven approach
+        fields = EDITOR_FIELDS.get(self.item_type, [])
+        self._load_editor_fields(props_frame, fields)
         
-        for i, (key, label) in enumerate(props):
+        # Load effects for weapon and scroll
+        if self.item_type in ("weapon", "scroll"):
+            self._load_effects_editor()
+    
+    def _load_editor_fields(self, parent, fields: List[Tuple[str, str]]):
+        """Generic method to load editor fields from config"""
+        for i, (key, label) in enumerate(fields):
             ttk.Label(parent, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=3)
             e = ttk.Entry(parent, width=25)
             e.grid(row=i, column=1, sticky="w", padx=5, pady=3)
             self.entries[key] = e
             e.insert(0, self.selected_item.get(key, 0))
-        
-        # Effects
+    
+    def _load_effects_editor(self):
+        """Load effects section for weapons and scrolls"""
         effects_frame = ttk.LabelFrame(self.editor_content, text="Effects", padding=10)
         effects_frame.pack(fill="x", padx=5, pady=5)
         
@@ -1165,70 +1216,6 @@ class ModernEditor(ttk.Frame):
             self.effect_combos.append(combo)
             
             # Match original: format as 8-char hex, take last 4 chars
-            effect_id = int(self.selected_item.get(f'effect_id_{i+1}', 0))
-            hex_id = f"{effect_id:08X}"[-4:]
-            for item in effect_list:
-                if item.startswith(hex_id):
-                    combo.set_silent(item)
-                    break
-            
-            ttk.Label(effects_frame, text="Mag:").grid(row=i, column=2, sticky="w", padx=5)
-            mag = ttk.Entry(effects_frame, width=12)
-            mag.grid(row=i, column=3, sticky="w", padx=5, pady=3)
-            mag.insert(0, self.selected_item.get(f'effect_magnitude_{i+1}', 0))
-            self.effect_mags.append(mag)
-    
-    def load_item_editor(self, parent):
-        assert self.selected_item is not None
-        props = [
-            ("item_id_1", "Item ID"),
-            ("Refashion", "Refashion"),
-            ("quantity", "Quantity"),
-        ]
-        
-        for i, (key, label) in enumerate(props):
-            ttk.Label(parent, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=3)
-            e = ttk.Entry(parent, width=25)
-            e.grid(row=i, column=1, sticky="w", padx=5, pady=3)
-            self.entries[key] = e
-            e.insert(0, self.selected_item.get(key, 0))
-    
-    def load_scroll_editor(self, parent):
-        assert self.selected_item is not None
-        props = [
-            ("item_id_1", "Item ID"),
-            ("item_id_2", "Item ID 2"),
-            ("item_id_3", "Item ID 3"),
-            ("item_level_1", "Level 1"),
-            ("item_level_2", "Level 2"),
-            ("higher_level_mod", "Higher Level Mod"),
-            ("tier", "Tier"),
-            ("is_it_locked", "Locked"),
-            ("attempts_remaining", "Attempts"),
-        ]
-        
-        for i, (key, label) in enumerate(props):
-            ttk.Label(parent, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=3)
-            e = ttk.Entry(parent, width=25)
-            e.grid(row=i, column=1, sticky="w", padx=5, pady=3)
-            self.entries[key] = e
-            e.insert(0, self.selected_item.get(key, 0))
-        
-        # Effects
-        effects_frame = ttk.LabelFrame(self.editor_content, text="Effects", padding=10)
-        effects_frame.pack(fill="x", padx=5, pady=5)
-        
-        self.effect_combos = []
-        self.effect_mags = []
-        
-        effect_list = JSONManager.get_effect_dropdown_list()
-        
-        for i in range(7):
-            ttk.Label(effects_frame, text=f"Effect {i+1}:").grid(row=i, column=0, sticky="w", padx=5, pady=3)
-            combo = SearchableCombobox(effects_frame, width=40, values=effect_list)
-            combo.grid(row=i, column=1, sticky="w", padx=5, pady=3)
-            self.effect_combos.append(combo)
-            
             effect_id = int(self.selected_item.get(f'effect_id_{i+1}', 0))
             hex_id = f"{effect_id:08X}"[-4:]
             for item in effect_list:
@@ -1277,7 +1264,7 @@ class ModernEditor(ttk.Frame):
         
         if messagebox.askyesno("Confirm", "Set all items to 9999?"):
             count = 0
-            for item in items:
+            for item in save_state.items:
                 if item['item_id_1'] != 0:
                     item['quantity'] = 9999
                     count += 1
@@ -1404,10 +1391,10 @@ class Nioh2EditorModern:
 
             if SHOW_LOAD_SUCCESS_POPUP:
                 messagebox.showinfo("Success", 
-                    f"Loaded {MODE} save\n"
-                    f"{len([w for w in weapons if w['item_id_1'] != 0])} weapons\n"
-                    f"{len([i for i in items if i['item_id_1'] != 0])} items\n"
-                    f"{len([s for s in scrolls if s['item_id_1'] != 0])} scrolls")
+                    f"Loaded {save_state.mode} save\n"
+                    f"{len([w for w in save_state.weapons if w['item_id_1'] != 0])} weapons\n"
+                    f"{len([i for i in save_state.items if i['item_id_1'] != 0])} items\n"
+                    f"{len([s for s in save_state.scrolls if s['item_id_1'] != 0])} scrolls")
 
     def auto_load_last_save(self) -> None:
         last_save_path = self.config.get("last_save_path", "")
@@ -1498,23 +1485,23 @@ class Nioh2EditorModern:
         return frame
     
     def update_stats_display(self):
-        if data is None:
+        if not save_state.data:
             return
         
         for name, (entry, offset, size) in self.stat_entries.items():
-            value = find_value_at_offset(data, offset, size)
+            value = find_value_at_offset(save_state.data, offset, size)
             entry.delete(0, tk.END)
             entry.insert(0, value if value is not None else 0)
     
     def save_stats(self):
-        if data is None:
+        if not save_state.data:
             messagebox.showwarning("Warning", "No file loaded")
             return
         
         try:
             for name, (entry, offset, size) in self.stat_entries.items():
                 value = int(entry.get())
-                data[offset:offset+size] = write_le(value, size)
+                save_state.data[offset:offset+size] = write_le(value, size)
             messagebox.showinfo("Success", "Stats updated!")
         except ValueError:
             messagebox.showerror("Error", "Invalid value entered")

@@ -2502,6 +2502,12 @@
         "id": "0396"
     },
     {
+        "Effect": "Grapple Damage",
+        "CAP": "0.125",
+        "rarity": "Common",
+        "id": "E294"
+    },
+    {
         "Effect": "Life Drain (Final Blow)",
         "CAP": "257",
         "rarity": "Rare",
