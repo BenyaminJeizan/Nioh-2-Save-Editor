@@ -948,9 +948,12 @@ class ModernEditor(ttk.Frame):
         paned.pack(side="left", fill="both", expand=True)
         paned.bind("<ButtonRelease-1>", self.save_panel_width)
         
+        # Calculate minimum width based on columns
+        self.min_panel_width = self.get_min_panel_width()
+        
         # LEFT PANEL - Item list
         left_frame = ttk.Frame(paned)
-        paned.add(left_frame, minsize=LEFT_PANEL_MIN_WIDTH)
+        paned.add(left_frame, minsize=self.min_panel_width)
         
         ttk.Label(left_frame, text=f"{self.item_type.title()}s").pack(anchor="w")
         self.filter_var = tk.StringVar()
@@ -984,6 +987,7 @@ class ModernEditor(ttk.Frame):
         ttk.Label(right_frame, text="Actions", font=("Arial", 10, "bold")).pack(pady=10)
         
         ttk.Button(right_frame, text="Save", command=self.on_save).pack(fill="x", pady=5)
+        ttk.Button(right_frame, text="Safe Save", command=self.on_safe_save).pack(fill="x", pady=5)
         ttk.Button(right_frame, text="Delete", command=self.on_delete).pack(fill="x", pady=5)
         ttk.Button(right_frame, text="Reset", command=self.on_reset).pack(fill="x", pady=5)
         
@@ -1009,7 +1013,7 @@ class ModernEditor(ttk.Frame):
         if len(self.paned.panes()) < 2:
             return
         try:
-            width = max(self.paned.sash_coord(0)[0], LEFT_PANEL_MIN_WIDTH)
+            width = max(self.paned.sash_coord(0)[0], self.min_panel_width)
             self.config["panel_widths"][self.item_type] = width
             ConfigManager.save_config(self.config)
         except TclError:
@@ -1017,7 +1021,7 @@ class ModernEditor(ttk.Frame):
     
     def load_panel_width(self):
         """Load and apply saved panel width"""
-        width = max(self.config.get("panel_widths", {}).get(self.item_type, LEFT_PANEL_MIN_WIDTH), LEFT_PANEL_MIN_WIDTH)
+        width = max(self.config.get("panel_widths", {}).get(self.item_type, self.min_panel_width), self.min_panel_width)
         if not hasattr(self, 'paned'):
             return
 
@@ -1031,21 +1035,38 @@ class ModernEditor(ttk.Frame):
                 self.paned.sash_place(0, width, 0)
             except TclError:
                 pass
-
         self.after_idle(_apply_sash)
     
     def get_list_columns(self) -> Tuple:
         if self.item_type == "weapon":
-            return ("slot", "id", "name", "level", "tier")
+            return ("slot", "id", "name", "level", "higher_lvl", "fam")
         elif self.item_type == "item":
             return ("slot", "id", "name", "qty")
         else:  # scroll
             return ("slot", "id", "name", "tier", "level")
+
+    def get_min_panel_width(self) -> int:
+        """Calculate minimum panel width based on column widths"""
+        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 40, "qty": 50, "higher_lvl": 80, "fam": 70}
+        columns = self.get_list_columns()
+        total = sum(widths.get(col, 60) for col in columns)
+        # Add padding for scrollbar (20) and borders/margins (30)
+        return total + 50
     
     def setup_treeview_columns(self, columns):
-        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 40, "qty": 50}
+        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 40, "qty": 50, "higher_lvl": 80, "fam": 70}
+        headings = {"higher_lvl": "Higher Level", "fam": "Familiarity", "qty": "Qty"}
         for col in columns:
-            self.tree.heading(col, text=col.capitalize())
+            heading = headings.get(col, col.replace("_", " ").title())
+            self.tree.heading(col, text=heading)
+            self.tree.column(col, width=widths.get(col, 60))
+    
+    def setup_treeview_columns(self, columns):
+        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 40, "qty": 50, "higher_lvl": 80, "fam": 70}
+        headings = {"higher_lvl": "Higher Level", "fam": "Familiarity", "qty": "Qty"}
+        for col in columns:
+            heading = headings.get(col, col.replace("_", " ").title())
+            self.tree.heading(col, text=heading)
             self.tree.column(col, width=widths.get(col, 60))
     
     def get_items(self) -> List[Dict]:
@@ -1072,7 +1093,7 @@ class ModernEditor(ttk.Frame):
                 continue
             
             if self.item_type == "weapon":
-                values = (item['slot'], iid_hex, name, item.get('weapon_level', 0), item.get('weapon_tier', 0))
+                values = (item['slot'], iid_hex, name, item.get('weapon_level', 0), item.get('Higher_Level_Modifier', 0), item.get('fam', 0))
             elif self.item_type == "item":
                 values = (item['slot'], iid_hex, name, item.get('quantity', 0))
             else:  # scroll
@@ -1114,7 +1135,7 @@ class ModernEditor(ttk.Frame):
         self.populate_list()
         self.load_editor()
 
-    def commit_editor_changes(self, refresh_list: bool = True) -> bool:
+    def commit_editor_changes(self, refresh_list: bool = True, safe_mode: bool = False) -> bool:
         if self.selected_item is None:
             return True
 
@@ -1129,10 +1150,16 @@ class ModernEditor(ttk.Frame):
                         hex_id = chosen.split(" - ", 1)[0].strip()
                         if hex_id:
                             self.selected_item[f'effect_id_{i+1}'] = int(hex_id, 16)
+                    elif not safe_mode:
+                        # Only clear effect if not in safe mode
+                        self.selected_item[f'effect_id_{i+1}'] = 0
 
                     mag_val = self.effect_mags[i].get().strip()
                     if mag_val:
                         self.selected_item[f'effect_magnitude_{i+1}'] = int(mag_val)
+                    elif not safe_mode:
+                        # Only clear magnitude if not in safe mode
+                        self.selected_item[f'effect_magnitude_{i+1}'] = 0
 
             if refresh_list and self.selected_index is not None:
                 self.populate_list(selected_slot=self.selected_index)
@@ -1208,6 +1235,8 @@ class ModernEditor(ttk.Frame):
         self.effect_mags = []
         
         effect_list = JSONManager.get_effect_dropdown_list()
+        # Build lookup dict with uppercase keys for case-insensitive matching
+        effect_lookup = {item.split(" - ", 1)[0].upper(): item for item in effect_list}
         
         for i in range(7):
             ttk.Label(effects_frame, text=f"Effect {i+1}:").grid(row=i, column=0, sticky="w", padx=5, pady=3)
@@ -1215,13 +1244,12 @@ class ModernEditor(ttk.Frame):
             combo.grid(row=i, column=1, sticky="w", padx=5, pady=3)
             self.effect_combos.append(combo)
             
-            # Match original: format as 8-char hex, take last 4 chars
-            effect_id = int(self.selected_item.get(f'effect_id_{i+1}', 0))
-            hex_id = f"{effect_id:08X}"[-4:]
-            for item in effect_list:
-                if item.startswith(hex_id):
-                    combo.set_silent(item)
-                    break
+            # Extract lower 16 bits, format as 4-char uppercase hex with leading zeros
+            effect_id = self.selected_item.get(f'effect_id_{i+1}', 0)
+            if effect_id != 0:
+                hex_id = f"{effect_id & 0xFFFF:04X}"  # Always uppercase
+                if hex_id in effect_lookup:
+                    combo.set_silent(effect_lookup[hex_id])
             
             ttk.Label(effects_frame, text="Mag:").grid(row=i, column=2, sticky="w", padx=5)
             mag = ttk.Entry(effects_frame, width=12)
@@ -1232,7 +1260,12 @@ class ModernEditor(ttk.Frame):
     def on_save(self):
         if self.selected_item is not None and not self.commit_editor_changes(refresh_list=True):
             return
+        FileManager.save_file()
 
+    def on_safe_save(self):
+        """Save without overwriting unrecognized effects (preserves unknown effect IDs)"""
+        if self.selected_item is not None and not self.commit_editor_changes(refresh_list=True, safe_mode=True):
+            return
         FileManager.save_file()
     
     def on_delete(self):
