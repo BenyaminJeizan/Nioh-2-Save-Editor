@@ -196,7 +196,7 @@ EDITOR_FIELDS = {
         ("weapon_level_start", "Level Start"),
         ("Higher_Level_Modifier", "Higher Level"),
         ("fam", "Familiarity"),
-        ("weapon_tier", "Tier"),
+        ("weapon_tier", "Tier (Rarity)"),
         ("yokai_weapon_gauge", "Yokai Gauge"),
         ("rcmd_level", "Recommended Level"),
         ("remodel_type", "Remodel Type"),
@@ -214,7 +214,7 @@ EDITOR_FIELDS = {
         ("item_level_1", "Level 1"),
         ("item_level_2", "Level 2"),
         ("higher_level_mod", "Higher Level Mod"),
-        ("tier", "Tier"),
+        ("tier", "Tier (Rarity)"),
         ("is_it_locked", "Locked"),
         ("attempts_remaining", "Attempts"),
     ],
@@ -1039,7 +1039,7 @@ class ModernEditor(ttk.Frame):
     
     def get_list_columns(self) -> Tuple:
         if self.item_type == "weapon":
-            return ("slot", "id", "name", "level", "higher_lvl", "fam")
+            return ("slot", "id", "name", "level", "higher_lvl", "fam", "tier")
         elif self.item_type == "item":
             return ("slot", "id", "name", "qty")
         else:  # scroll
@@ -1047,23 +1047,15 @@ class ModernEditor(ttk.Frame):
 
     def get_min_panel_width(self) -> int:
         """Calculate minimum panel width based on column widths"""
-        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 40, "qty": 50, "higher_lvl": 80, "fam": 70}
+        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 80, "qty": 50, "higher_lvl": 80, "fam": 70}
         columns = self.get_list_columns()
         total = sum(widths.get(col, 60) for col in columns)
         # Add padding for scrollbar (20) and borders/margins (30)
         return total + 50
     
     def setup_treeview_columns(self, columns):
-        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 40, "qty": 50, "higher_lvl": 80, "fam": 70}
-        headings = {"higher_lvl": "Higher Level", "fam": "Familiarity", "qty": "Qty"}
-        for col in columns:
-            heading = headings.get(col, col.replace("_", " ").title())
-            self.tree.heading(col, text=heading)
-            self.tree.column(col, width=widths.get(col, 60))
-    
-    def setup_treeview_columns(self, columns):
-        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 40, "qty": 50, "higher_lvl": 80, "fam": 70}
-        headings = {"higher_lvl": "Higher Level", "fam": "Familiarity", "qty": "Qty"}
+        widths = {"slot": 40, "id": 60, "name": 150, "level": 50, "tier": 80, "qty": 50, "higher_lvl": 80, "fam": 70}
+        headings = {"higher_lvl": "Higher Level", "fam": "Familiarity", "qty": "Qty", "tier": "Tier (Rarity)"}
         for col in columns:
             heading = headings.get(col, col.replace("_", " ").title())
             self.tree.heading(col, text=heading)
@@ -1077,6 +1069,7 @@ class ModernEditor(ttk.Frame):
         else:
             return save_state.scrolls
     
+
     def populate_list(self, selected_slot: Optional[int] = None):
         self.tree.delete(*self.tree.get_children())
         filter_text = self.filter_var.get().lower()
@@ -1093,7 +1086,7 @@ class ModernEditor(ttk.Frame):
                 continue
             
             if self.item_type == "weapon":
-                values = (item['slot'], iid_hex, name, item.get('weapon_level', 0), item.get('Higher_Level_Modifier', 0), item.get('fam', 0))
+                values = (item['slot'], iid_hex, name, item.get('weapon_level', 0), item.get('Higher_Level_Modifier', 0), item.get('fam', 0), item.get('weapon_tier', 0))
             elif self.item_type == "item":
                 values = (item['slot'], iid_hex, name, item.get('quantity', 0))
             else:  # scroll
@@ -1103,6 +1096,7 @@ class ModernEditor(ttk.Frame):
 
         if selected_slot is not None:
             self._set_tree_selection(selected_slot)
+
 
     def _set_tree_selection(self, slot: int) -> None:
         tree_iid = str(slot)
