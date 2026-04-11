@@ -1143,16 +1143,29 @@ class ModernEditor(ttk.Frame):
                     if chosen:
                         hex_id = chosen.split(" - ", 1)[0].strip()
                         if hex_id:
-                            self.selected_item[f'effect_id_{i+1}'] = int(hex_id, 16)
-                    elif not safe_mode:
-                        # Only clear effect if not in safe mode
+                            try:
+                                self.selected_item[f'effect_id_{i+1}'] = int(hex_id, 16)
+                            except ValueError:
+                                # Invalid hex, preserve original in safe mode
+                                if safe_mode and hasattr(self, 'original_effect_ids'):
+                                    pass  # Keep existing value
+                                else:
+                                    self.selected_item[f'effect_id_{i+1}'] = 0
+                    elif safe_mode and hasattr(self, 'original_effect_ids'):
+                        # Safe mode: preserve original effect ID when combo is empty
+                        self.selected_item[f'effect_id_{i+1}'] = self.original_effect_ids[i]
+                    else:
+                        # Normal mode: clear effect
                         self.selected_item[f'effect_id_{i+1}'] = 0
 
                     mag_val = self.effect_mags[i].get().strip()
                     if mag_val:
                         self.selected_item[f'effect_magnitude_{i+1}'] = int(mag_val)
-                    elif not safe_mode:
-                        # Only clear magnitude if not in safe mode
+                    elif safe_mode:
+                        # Safe mode: preserve original magnitude
+                        pass  # Keep existing value in selected_item
+                    else:
+                        # Normal mode: clear magnitude
                         self.selected_item[f'effect_magnitude_{i+1}'] = 0
 
             if refresh_list and self.selected_index is not None:
@@ -1227,6 +1240,7 @@ class ModernEditor(ttk.Frame):
         
         self.effect_combos = []
         self.effect_mags = []
+        self.original_effect_ids = []  # Store original IDs for safe save
         
         effect_list = JSONManager.get_effect_dropdown_list()
         # Build lookup dict with uppercase keys for case-insensitive matching
@@ -1240,10 +1254,15 @@ class ModernEditor(ttk.Frame):
             
             # Extract lower 16 bits, format as 4-char uppercase hex with leading zeros
             effect_id = self.selected_item.get(f'effect_id_{i+1}', 0)
+            self.original_effect_ids.append(effect_id)  # Store original
+            
             if effect_id != 0:
                 hex_id = f"{effect_id & 0xFFFF:04X}"  # Always uppercase
                 if hex_id in effect_lookup:
                     combo.set_silent(effect_lookup[hex_id])
+                else:
+                    # Show unknown effect with its hex ID so user knows it exists
+                    combo.set_silent(f"{hex_id} - (Unknown Effect)")
             
             ttk.Label(effects_frame, text="Mag:").grid(row=i, column=2, sticky="w", padx=5)
             mag = ttk.Entry(effects_frame, width=12)
